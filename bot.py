@@ -362,20 +362,23 @@ def get_free_disk_space_gb() -> float:
 
 def launch_in_iina(file_path: Any) -> Tuple[bool, str]:
     """Запускає відеофайл у відеоплеєрі IINA на Mac (підтримує локальний Mac та серверний міст)."""
+    import platform
     p_str = str(file_path.resolve() if hasattr(file_path, "resolve") else file_path)
 
-    # Якщо ми на сервері Railway — ставимо команду для Mac-агента
-    if not Path(p_str).exists():
+    # Якщо ми на сервері Linux (Railway) або файл фізично не існує локально —
+    # ми НЕ викликаємо локальний /usr/bin/open, а передаємо команду нашому Mac-агенту!
+    if platform.system() != "Darwin" or not Path(p_str).exists():
         queue_mac_command("open_iina", p_str)
-        return True, "IINA (надіслано на Mac)"
+        return True, "IINA на Mac"
 
     try:
+        open_bin = "/usr/bin/open" if Path("/usr/bin/open").exists() else "open"
         iina_app = Path("/Applications/IINA.app")
         if iina_app.exists():
-            subprocess.Popen(["/usr/bin/open", "-a", str(iina_app), p_str])
+            subprocess.Popen([open_bin, "-a", str(iina_app), p_str])
             return True, "IINA"
         else:
-            subprocess.Popen(["/usr/bin/open", p_str])
+            subprocess.Popen([open_bin, p_str])
             return True, "відеоплеєрі"
     except Exception as e:
         logger.error(f"Помилка запуску IINA: {e}")
@@ -384,18 +387,20 @@ def launch_in_iina(file_path: Any) -> Tuple[bool, str]:
 
 def reveal_in_finder(file_path: Any) -> bool:
     """Відкриває та підсвічує завантажений файл у Finder на Mac."""
+    import platform
     p_str = str(file_path.resolve() if hasattr(file_path, "resolve") else file_path)
-    if not Path(p_str).exists():
+    if platform.system() != "Darwin" or not Path(p_str).exists():
         queue_mac_command("reveal_folder", p_str)
         return True
 
     try:
+        open_bin = "/usr/bin/open" if Path("/usr/bin/open").exists() else "open"
         p = Path(p_str)
         if p.exists():
-            subprocess.Popen(["/usr/bin/open", "-R", str(p.resolve())])
+            subprocess.Popen([open_bin, "-R", str(p.resolve())])
             return True
         elif p.parent.exists():
-            subprocess.Popen(["/usr/bin/open", str(p.parent.resolve())])
+            subprocess.Popen([open_bin, str(p.parent.resolve())])
             return True
     except Exception as e:
         logger.error(f"Помилка відкриття у Finder: {e}")
