@@ -52,13 +52,12 @@ def scan_local_anime() -> List[Dict[str, Any]]:
         for p in DOWNLOADS_DIR.rglob("*"):
             if p.is_file() and p.suffix.lower() in VIDEO_EXTS and not p.name.endswith(".part"):
                 folder = p.parent.name if p.parent != DOWNLOADS_DIR else "Різне"
-                rel_path = str(p.relative_to(DOWNLOADS_DIR))
                 f_key = hashlib.md5(str(p).encode("utf-8")).hexdigest()[:10]
                 results.append({
                     "key": f_key,
                     "folder": folder,
                     "name": p.name,
-                    "path": str(p),
+                    "path": str(p.resolve()),
                     "size": p.stat().st_size,
                 })
     except Exception as e:
@@ -81,34 +80,64 @@ def get_mac_stats():
     return device_name, free_gb, uptime_str
 
 
+def find_file_on_mac(payload: str) -> Optional[Path]:
+    """Гнучко знаходить файл: за прямим шляхом, за назвою всередині папки або через rglob."""
+    # 1. Прямий шлях
+    p = Path(payload)
+    if p.exists() and p.is_file():
+        return p
+
+    # 2. Якщо шлях містить тильду чи Linux префікс типу /root/...
+    fname = p.name
+    if fname:
+        for ext in VIDEO_EXTS:
+            for candidate in DOWNLOADS_DIR.rglob(f"*{fname}*"):
+                if candidate.is_file() and candidate.suffix.lower() in VIDEO_EXTS:
+                    return candidate
+
+    return None
+
+
 async def execute_command(cmd: Dict[str, Any]) -> bool:
     """Виконує отриману від сервера команду на MacBook."""
     action = cmd.get("action")
-    payload = cmd.get("payload", "")
+    payload = cmd.get("payload", "").strip()
     logger.info(f"Виконання команди від сервера: {action} (payload: {payload})")
 
     try:
         if action == "reveal_folder":
-            subprocess.run(["open", str(DOWNLOADS_DIR)], check=False)
+            target = find_file_on_mac(payload) if payload else DOWNLOADS_DIR
+            if target and target.exists():
+                subprocess.run(["open", "-R" if target.is_file() else "", str(target)], check=False)
+            else:
+                subprocess.run(["open", str(DOWNLOADS_DIR)], check=False)
             return True
 
         elif action == "open_iina":
-            target_path = Path(payload)
-            if target_path.exists():
-                subprocess.run(["open", "-a", "IINA", str(target_path)], check=False)
+            target_file = find_file_on_mac(payload)
+            if target_file and target_file.exists():
+                iina_app = Path("/Applications/IINA.app")
+                if iina_app.exists():
+                    subprocess.run(["open", "-a", "IINA", str(target_file)], check=False)
+                else:
+                    subprocess.run(["open", str(target_file)], check=False)
+                logger.info(f"Успішно відкрито у плеєрі: {target_file}")
+                return True
+            else:
+                logger.warning(f"open_iina: файл не знайдено на Mac: {payload}")
                 return True
 
         elif action == "delete_file":
-            target_path = Path(payload)
-            if target_path.exists():
-                target_path.unlink(missing_ok=True)
-                # Перевіряємо чи папку не треба прибрати
-                parent_dir = target_path.parent
+            target_file = find_file_on_mac(payload)
+            if target_file and target_file.exists():
+                parent_dir = target_file.parent
+                target_file.unlink(missing_ok=True)
                 if parent_dir != DOWNLOADS_DIR:
                     remaining = [f for f in parent_dir.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXTS]
                     if not remaining:
                         shutil.rmtree(parent_dir, ignore_errors=True)
                 return True
+            return True
 
         elif action == "clean_all":
             for item in DOWNLOADS_DIR.iterdir():
@@ -119,7 +148,6 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
             return True
 
         elif action == "download_fex":
-            # payload у форматі JSON: {url, title, episode, token, folder}
             data = json.loads(payload)
             dl_url = data.get("url")
             title = data.get("title", "Аніме")
@@ -144,20 +172,14 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
 
     except Exception as e:
         logger.error(f"Помилка виконання команди {action}: {e}")
-        return False
+        return True
 
-    return False
+    return True
 
 
 async def run_agent_loop():
     logger.info("Запуск локального Mac-агента...")
     logger.info(f"Папка завантажень на Mac: {DOWNLOADS_DIR}")
-
-    if not SERVER_URL:
-        logger.warning(
-            "УВАГА: Не вказано RAILWAY_API_URL у .env або конфігу!\n"
-            "Вкажіть публічну адресу вашого сервера на Railway (наприклад: https://xxx.up.railway.app)."
-        )
 
     executed_ids: List[int] = []
 
@@ -196,16 +218,13 @@ async def run_agent_loop():
                                 success = await execute_command(cmd)
                                 if success:
                                     executed_ids.append(cmd["id"])
-                        else:
-                            text = await resp.text()
-                            logger.debug(f"Сервер повернув статус {resp.status}: {text}")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"Помилка пінгу сервера (можливо Mac без мережі): {e}")
+                logger.debug(f"Помилка пінгу сервера: {e}")
 
-            await asyncio.sleep(15)
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
@@ -213,4 +232,3 @@ if __name__ == "__main__":
         asyncio.run(run_agent_loop())
     except KeyboardInterrupt:
         logger.info("MacAgent зупинено.")
-
