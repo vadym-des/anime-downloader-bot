@@ -344,6 +344,17 @@ def delete_subscription_by_title(chat_id: int, title: str) -> bool:
     return deleted
 
 
+def get_max_seen_post_id(channel: str) -> Optional[int]:
+    """Повертає максимальний вже оброблений post_id для каналу (або None, якщо канал ще не сканувався)."""
+    init_channel_monitor_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT MAX(post_id) FROM channel_seen_posts WHERE channel = ?",
+            (channel.lower(),)
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+
 def is_post_seen(channel: str, post_id: int) -> bool:
     """Перевіряє, чи цей пост уже оброблявся."""
     init_channel_monitor_db()
