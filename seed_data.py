@@ -34,6 +34,8 @@ SEED_TITLES: List[Dict[str, Optional[str]]] = [
      "fex": "https://fex.net/s/klakz3l", "thread": None},
     {"title": "Військові хроніки Ромелії", "pref": "dub",
      "fex": "https://fex.net/s/5a8oskn", "thread": None},
+    {"title": "Весілля світлячка", "pref": "dub",
+     "fex": "https://fex.net/s/mynzyl5", "thread": "https://t.me/mediareser/11897"},
 ]
 
 

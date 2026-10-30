@@ -42,6 +42,7 @@ from mac_sync_schema import (
 from sync_server import run_sync_server
 from channel_monitor import (
     init_channel_monitor_db,
+    normalize_title_for_match,
     add_subscription,
     get_subscriptions,
     get_subscription_by_title,
@@ -68,6 +69,7 @@ from channel_monitor import (
     clear_pending_digest,
     enforce_auto_binge_limit,
 )
+from seed_data import seed_subscriptions
 from config import (
     ALLOWED_USERS,
     BASE_DIR,
@@ -421,33 +423,19 @@ def reveal_in_finder(file_path: Any) -> bool:
 
 
 def build_downloaded_action_keyboard(file_key: str, title: Optional[str] = None, chat_id: Optional[int] = None) -> InlineKeyboardMarkup:
-    """Створює зручні інлайн-кнопки для завантаженого відео: IINA, Finder, Нагадування, Моніторинг та видалення."""
+    """Створює зручні інлайн-кнопки для завантаженого відео: плеєр, Finder, видалення та повернення до списку."""
     rows = [
         [
-            InlineKeyboardButton(text="▶️ Дивитися в IINA", callback_data=f"play:{file_key}"),
-            InlineKeyboardButton(text="📂 У Finder", callback_data=f"reveal:{file_key}"),
-        ]
+            InlineKeyboardButton(text="▶️ Запустити в плеєрі", callback_data=f"play:{file_key}"),
+            InlineKeyboardButton(text="📁 Відкрити у Finder", callback_data=f"finder:{file_key}"),
+        ],
+        [
+            InlineKeyboardButton(text="🗑 Видалити", callback_data=f"del:{file_key}"),
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="refresh_list"),
+        ],
     ]
-
-    # Якщо передано тайтл — додаємо кнопку швидкої підписки «Форвард = Підписка»
-    if title:
-        clean_name = format_anime_display_name(title, max_len=40)
-        sub = get_subscription_by_title(chat_id, title) if chat_id else None
-        if sub:
-            p_badge = "🎙 Озвучення" if sub["pref_type"] == "dub" else ("📝 Саби" if sub["pref_type"] == "sub" else "⚡️ Будь-що")
-            rows.append([
-                InlineKeyboardButton(text=f"✅ Стежу ({p_badge})", callback_data=f"track_card:{clean_name}")
-            ])
-        else:
-            rows.append([
-                InlineKeyboardButton(text="🔔 Стежити за цим аніме", callback_data=f"track_card:{clean_name}")
-            ])
-
-    rows.append([
-        InlineKeyboardButton(text="⏰ Нагадати о 21:10", callback_data=f"remind_evening:{file_key}"),
-        InlineKeyboardButton(text="🗑 Подивився — Видалити", callback_data=f"del:{file_key}"),
-    ])
-
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1011,7 +999,7 @@ def build_track_main_menu(chat_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             text += f"<b>{idx}.</b> 🎬 {s['title']}\n      └ <i>{pref_label} • {src}</i>\n\n"
             t_key = register_track_title(s["title"])
             kb_rows.append([
-                InlineKeyboardButton(text=f"📥 {s['title'][:26]}", callback_data=f"track_card:{t_key}"),
+                InlineKeyboardButton(text=f"{idx}. 🎬 {s['title'][:26]}", callback_data=f"track_card:{t_key}"),
                 InlineKeyboardButton(text="❌ Відписатися", callback_data=f"untrack:{s['id']}"),
             ])
 
@@ -2722,14 +2710,6 @@ async def cb_play_video(callback: CallbackQuery):
     ok, app_name = launch_in_iina(file_path)
     if ok:
         set_currently_playing(file_key)
-        if callback.from_user:
-            user_id = callback.from_user.id
-            old_task = SMART_CLEANUP_TASKS.get(file_key)
-            if old_task and not old_task.done():
-                old_task.cancel()
-            t = asyncio.create_task(smart_cleanup_timer(callback.bot, user_id, file_key, delay_seconds=1200))
-            SMART_CLEANUP_TASKS[file_key] = t
-
         try:
             await cb_item_menu(callback)
         except Exception:
@@ -3288,11 +3268,19 @@ def _normalize_anime_title(raw: str) -> str:
 
 async def offer_tracking(bot: Bot, chat_id: int, raw_title: str,
                          fex_url: Optional[str] = None, thread_url: Optional[str] = None):
-    """Після завантаження пропонує одним повідомленням: Стежити за оновленнями? [Так] / [Ні]."""
+    """Після завантаження пропонує одним повідомленням: Стежити за оновленнями? [Так] / [Ні], тільки якщо тайтлу ще немає в моніторингу."""
+    try:
+        if not get_user_settings(chat_id).get("seeded"):
+            seed_subscriptions(chat_id)
+            set_user_setting(chat_id, "seeded", 1)
+    except Exception:
+        pass
+
     title = _normalize_anime_title(raw_title)
-    if get_subscription_by_title(chat_id, title):
-        # Вже стежимо — лише тихо доповнюємо джерела, якщо їх не було
-        set_subscription_sources(chat_id, title, fex_url=fex_url, thread_url=thread_url)
+    existing_sub = get_subscription_by_title(chat_id, title) or get_subscription_by_title(chat_id, raw_title)
+    if existing_sub:
+        # Вже стежимо — лише тихо доповнюємо джерела, якщо їх не було, і не питаємо повторно!
+        set_subscription_sources(chat_id, existing_sub["title"], fex_url=fex_url, thread_url=thread_url)
         return
     t_key = register_track_title(title)
     PENDING_TRACK_SOURCES[t_key] = {"fex": fex_url, "thread": thread_url}
@@ -3317,7 +3305,8 @@ async def cb_fw_track_yes(callback: CallbackQuery):
         return
     src = PENDING_TRACK_SOURCES.pop(t_key, {})
     chat_id = callback.message.chat.id
-    add_subscription(chat_id, title, channel="ridnyiholos", pref_type="any")
+    pref = detect_pref_from_text(title) or ("dub" if src.get("fex") else "sub")
+    add_subscription(chat_id, title, channel="ridnyiholos", pref_type=pref)
     set_subscription_sources(chat_id, title, fex_url=src.get("fex"), thread_url=src.get("thread"))
     try:
         await callback.message.edit_text(
@@ -3343,13 +3332,20 @@ PENDING_SOURCE_INPUT: Dict[int, str] = {}  # chat_id -> t_key тайтлу, дл
 
 
 async def ask_source_for_media(bot: Bot, chat_id: int, raw_title: str):
-    """Після збереження відеофайлу без посилання: пропонує вказати гілку/роздачу для авто-стеження."""
+    """Після збереження відеофайлу без посилання: пропонує вказати гілку/роздачу для авто-стеження, тільки якщо тайтлу ще немає в моніторингу."""
+    try:
+        if not get_user_settings(chat_id).get("seeded"):
+            seed_subscriptions(chat_id)
+            set_user_setting(chat_id, "seeded", 1)
+    except Exception:
+        pass
+
     title = _normalize_anime_title(raw_title)
     if title.lower() == "telegram_anime":
         return
-    sub = get_subscription_by_title(chat_id, title)
-    if sub and (sub.get("fex_url") or sub.get("thread_url")):
-        return  # джерело вже відоме
+    sub = get_subscription_by_title(chat_id, title) or get_subscription_by_title(chat_id, raw_title)
+    if sub:
+        return  # Тайтл уже в списку моніторингу — не пропонуємо повторно!
     t_key = register_track_title(title)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔗 Вказати посилання", callback_data=f"src_link:{t_key}"),
@@ -3968,40 +3964,44 @@ async def mac_sleep_watchdog(bot: Bot):
 
 async def channel_monitoring_loop(bot: Bot):
     """
-    Фоновий моніторинг оновлень публічних каналів аніме (кожні 3 хвилини).
+    Фоновий моніторинг оновлень публічних каналів аніме (@ridnyiholos та тестового @testpushbotanime).
     Автоматично скачує нові серії згідно з підписками (тільки озвучення / тільки субтитри / будь-яке).
-    При першому запуску фіксує baseline поточних постів каналу, щоб ніколи не слати старі сповіщення із запізненням.
+    При старті фіксує baseline поточних постів каналу та перевіряє час публікації, щоб ніколи не слати старі сповіщення під час оновлень.
     """
+    boot_ts = time.time()
+
     # Початкова ініціалізація baseline при старті бота
     try:
         init_subs = get_subscriptions()
-        init_channels = set(s.get("channel", "ridnyiholos") for s in init_subs) | {"ridnyiholos"}
+        init_channels = set(s.get("channel", "ridnyiholos") for s in init_subs) | {"ridnyiholos", "testpushbotanime"}
+        # Для тестового каналу фіксуємо стартовий сервісний пост #1 як baseline, щоб перший же тестовий пост спрацював миттєво
+        if get_max_seen_post_id("testpushbotanime") is None:
+            mark_post_seen("testpushbotanime", 1)
         for ch in init_channels:
-            if get_max_seen_post_id(ch) is None:
-                init_posts = await fetch_channel_posts(ch)
-                for p in init_posts:
-                    mark_post_seen(ch, p["post_id"])
-                if init_posts:
-                    logger.info(f"Channel baseline @{ch}: зафіксовано {len(init_posts)} існуючих постів (max ID={ max(p['post_id'] for p in init_posts) })")
+            init_posts = await fetch_channel_posts(ch, pages=1)
+            for p in init_posts:
+                mark_post_seen(ch, p["post_id"])
+            if init_posts:
+                logger.info(f"Channel baseline @{ch}: зафіксовано {len(init_posts)} існуючих постів (max ID={max(p['post_id'] for p in init_posts)})")
     except Exception as e_init:
         logger.debug(f"Помилка ініціалізації baseline каналу: {e_init}")
 
     while True:
         try:
-            await asyncio.sleep(180)  # перевірка кожні 3 хвилини
+            await asyncio.sleep(25)  # швидка перевірка кожні 25 секунд
             subs = get_subscriptions()
             if not subs:
                 continue
 
-            channels = set(s.get("channel", "ridnyiholos") for s in subs)
+            channels = set(s.get("channel", "ridnyiholos") for s in subs) | {"ridnyiholos", "testpushbotanime"}
             for ch in channels:
                 max_seen = get_max_seen_post_id(ch)
-                posts = await fetch_channel_posts(ch)
+                posts = await fetch_channel_posts(ch, pages=1)
                 if not posts:
                     continue
 
-                # Якщо таблиця seen ще порожня — робимо baseline і не спамимо старими постами!
-                if max_seen is None:
+                # Якщо таблиця seen для основного каналу ще порожня — робимо baseline і не спамимо старими постами!
+                if max_seen is None and ch != "testpushbotanime":
                     for p in posts:
                         mark_post_seen(ch, p["post_id"])
                     logger.info(f"Channel baseline @{ch}: зафіксовано {len(posts)} постів")
@@ -4010,23 +4010,44 @@ async def channel_monitoring_loop(bot: Bot):
                 for post in sorted(posts, key=lambda x: x["post_id"]):
                     pid = post["post_id"]
                     # Ігноруємо всі пости, які вже бачили або які старіші за наш max_seen
-                    if pid <= max_seen or is_post_seen(ch, pid):
+                    if (max_seen is not None and pid <= max_seen) or is_post_seen(ch, pid):
+                        mark_post_seen(ch, pid)
+                        continue
+
+                    # Захист від ретроактивних сповіщень при рестарті/оновленні бота:
+                    # якщо пост на @ridnyiholos вийшов ДО запуску поточного процесу бота — тихо додаємо в seen
+                    p_ts = post.get("post_ts")
+                    if ch != "testpushbotanime" and p_ts and p_ts < (boot_ts - 60):
+                        mark_post_seen(ch, pid)
+                        continue
+
+                    norm_post_title = normalize_title_for_match(post.get("title", ""))
+                    norm_post_text = normalize_title_for_match(post.get("clean_text", ""))
+                    if not norm_post_title or len(norm_post_title) < 3:
                         mark_post_seen(ch, pid)
                         continue
 
                     matched_sub = None
-                    post_title_low = post["title"].lower()
                     for s in subs:
-                        if s.get("channel", "ridnyiholos") != ch:
+                        sub_ch = s.get("channel", "ridnyiholos")
+                        # Тестовий канал @testpushbotanime перевіряється по всіх підписках користувача!
+                        if ch != "testpushbotanime" and sub_ch != ch:
                             continue
-                        sub_t = s["title"].lower()
-                        if sub_t in post_title_low or post_title_low in sub_t or sub_t in post["clean_text"].lower():
+                        norm_sub_t = normalize_title_for_match(s.get("title", ""))
+                        if not norm_sub_t or len(norm_sub_t) < 3:
+                            continue
+                        if norm_sub_t in norm_post_title or norm_post_title in norm_sub_t or norm_sub_t in norm_post_text:
                             pref = s.get("pref_type", "dub" if s.get("fex_url") else "any")
+                            # У тестовому каналі дозволяємо спрацьовування навіть якщо не вказано явно "з озвученням"/"з субтитрами"
+                            if ch == "testpushbotanime" and post["release_type"] == "any":
+                                matched_sub = s
+                                break
                             # Якщо користувач обрав "any", але для цієї або новішої серії вже є DUB — не шлемо SUB
                             if pref == "any" and post["release_type"] == "sub" and post.get("ep_num"):
                                 ep_n = post["ep_num"]
                                 dub_already_out = any(
-                                    (sub_t in p2["title"].lower() or p2["title"].lower() in sub_t)
+                                    normalize_title_for_match(p2.get("title", ""))
+                                    and (norm_sub_t in normalize_title_for_match(p2.get("title", "")) or normalize_title_for_match(p2.get("title", "")) in norm_sub_t)
                                     and p2.get("release_type") == "dub"
                                     and (p2.get("ep_num") or 0) >= ep_n
                                     for p2 in posts
@@ -4044,8 +4065,14 @@ async def channel_monitoring_loop(bot: Bot):
                     # Знайдено відповідність підписці!
                     mark_post_seen(ch, pid)
                     user_chat = matched_sub["chat_id"]
+                    display_title = matched_sub["title"]
                     ep_text = f" [Серія {post['ep_num']}]" if post.get("ep_num") else ""
-                    type_text = "🎙 з озвученням" if post["release_type"] == "dub" else ("📝 з субтитрами" if post["release_type"] == "sub" else "")
+                    if post["release_type"] == "dub":
+                        type_text = " (🎙 з озвученням)"
+                    elif post["release_type"] == "sub":
+                        type_text = " (📝 з субтитрами)"
+                    else:
+                        type_text = " (🎙 з озвученням)" if matched_sub.get("pref_type") == "dub" else ""
                     eta = calculate_download_eta()
 
                     quiet = is_in_quiet_hours(user_chat)
@@ -4061,22 +4088,30 @@ async def channel_monitoring_loop(bot: Bot):
                         elif "mediareser" in l_url and not media_tg_link:
                             media_tg_link = l_url
 
+                    # Якщо в пості (наприклад, у тестовому каналі @testpushbotanime) не вставлено посилання,
+                    # автоматично підтягуємо FEX або гілку медіатеки зі збереженої підписки!
+                    if not has_fex_link and not media_tg_link:
+                        if matched_sub.get("fex_url") and post["release_type"] != "sub":
+                            has_fex_link = True
+                            fex_link = matched_sub["fex_url"]
+                        elif matched_sub.get("thread_url"):
+                            media_tg_link = matched_sub["thread_url"]
+
                     # ВАРІАНТ 1: Тайтл з Медіатеки (лише онлайн субтитри)
                     if not has_fex_link:
-                        tg_url = media_tg_link or f"https://t.me/{ch}/{pid}"
+                        tg_url = media_tg_link or matched_sub.get("thread_url") or f"https://t.me/{ch}/{pid}"
                         notify_text = (
-                            f"🔔 <b>Вийшла нова серія:</b> <code>{post['title']}</code>{ep_text} ({type_text})!\n"
+                            f"🔔 <b>Вийшла нова серія:</b> <code>{display_title}</code>{ep_text}{type_text}!\n"
                             f"📡 <i>Канал:</i> @{ch}\n\n"
-                            "🟡 <b>Формат релізу:</b> 📲 <i>Ексклюзив онлайн-медіатеки Telegram</i>\n\n"
+                            "🟡 <b>Формат релізу:</b> 📲 <i>Онлайн-медіатека Telegram</i>\n\n"
                             "✨ <b>Як скачати цю серію на Mac в 1 клік:</b>\n"
                             "1. Відкрийте серію в медіатеці за кнопкою нижче.\n"
                             "2. Натисніть <b>«Переслати» (Forward)</b> на відеофайл сюди ботові.\n"
-                            "🚀 <i>Бот миттєво збереже його на ноутбук на повній швидкості без ліміту 20 МБ!</i>"
+                            "🚀 <i>Бот миттєво збереже його на ноутбук на повній швидкості!</i>"
                         )
                         kb_notify = InlineKeyboardMarkup(
                             inline_keyboard=[
                                 [InlineKeyboardButton(text="↗️ Відкрити серію в Медіатеці", url=tg_url)],
-                                [InlineKeyboardButton(text="⏰ Нагадати переглянути ввечері", callback_data="remind_evening:custom")]
                             ]
                         )
                         try:
@@ -4091,11 +4126,8 @@ async def channel_monitoring_loop(bot: Bot):
                         continue
 
                     # ВАРІАНТ 2: Тайтл із FEX.NET (Повний авто-пілот у 4K/1080p)
-                    # Якщо у підписки є пряма FEX-роздача — завантаженням займається fex_share_watch_loop
-                    if matched_sub.get("fex_url"):
-                        continue
                     header_notify = (
-                        f"🔔 <b>Вийшла нова серія:</b> <code>{post['title']}</code>{ep_text} ({type_text})!\n"
+                        f"🔔 <b>Вийшла нова серія:</b> <code>{display_title}</code>{ep_text}{type_text}!\n"
                         f"📡 <i>Канал:</i> @{ch}\n"
                         f"⚡️ <i>Орієнтовний час завантаження:</i> ~{eta}\n\n"
                         "🚀 <b>Починаю автоматичне завантаження на ваш Mac...</b>"
@@ -4107,77 +4139,85 @@ async def channel_monitoring_loop(bot: Bot):
                         disable_notification=quiet
                     )
 
-                    sorted_links = score_and_sort_links(post["links"])
-                    if sorted_links:
-                        lbl, top_url = sorted_links[0]
-                        share_key = FexDownloader.extract_share_key(top_url)
-                        if share_key:
-                            clean_t = sanitize_folder_name(post["title"])
-                            t_folder = DOWNLOADS_DIR / clean_t
-                            t_folder.mkdir(parents=True, exist_ok=True)
-                            files = await FexDownloader.get_files_in_share(share_key)
-                            if files:
-                                if post.get("ep_num"):
-                                    ep_n = post["ep_num"]
-                                    ep_pats = [f"[{ep_n:02d}", f"[{ep_n} "]
-                                    files = [f for f in files if any(p in f.get("name", "") for p in ep_pats)] or files
-                                preferred_4k = [f for f in files if any(q in f.get("name", "").lower() for q in ["2160p", "4k"])]
-                                preferred_1080p = [f for f in files if "1080p" in f.get("name", "").lower()]
-                                target_file = preferred_4k[0] if preferred_4k else (preferred_1080p[0] if preferred_1080p else files[0])
-                                f_name = target_file.get("name", "episode.mp4")
-                                dest = t_folder / f_name
-                                dl_url = target_file.get("download_url")
-                                tok = target_file.get("token")
-                                if dl_url:
-                                    if platform.system() != "Darwin":
-                                        cmd_payload = json.dumps({
-                                            "url": dl_url,
-                                            "token": tok,
-                                            "title": post["title"],
-                                            "episode": post.get("ep_num", 1),
-                                            "folder": t_folder.name,
-                                            "filename": dest.name,
-                                            "chat_id": user_chat,
-                                            "msg_id": notify_msg.message_id if notify_msg else None,
-                                            "quality": "4K Ultra HD" if "2160p" in dest.name else "1080p Full HD",
-                                            "dub_sub": "Озвучення + Субтитри"
-                                        })
-                                        queue_mac_command("download_fex", cmd_payload)
-                                        continue
+                    share_key = FexDownloader.extract_share_key(fex_link) if fex_link else None
+                    if not share_key:
+                        sorted_links = score_and_sort_links(post["links"])
+                        if sorted_links:
+                            share_key = FexDownloader.extract_share_key(sorted_links[0][1])
 
-                                    tracker = DownloadProgressTracker(interval_seconds=2.5)
+                    if share_key:
+                        clean_t = sanitize_folder_name(display_title)
+                        t_folder = DOWNLOADS_DIR / clean_t
+                        t_folder.mkdir(parents=True, exist_ok=True)
+                        files = await FexDownloader.get_files_in_share(share_key)
+                        if files:
+                            all_share_names = [f.get("name", "") for f in files]
+                            if post.get("ep_num"):
+                                ep_n = post["ep_num"]
+                                ep_pats = [f"[{ep_n:02d}", f"[{ep_n} ", f"[{ep_n}]", f" {ep_n:02d} "]
+                                files = [f for f in files if any(p in f.get("name", "") for p in ep_pats)] or files
+                            preferred_4k = [f for f in files if any(q in f.get("name", "").lower() for q in ["2160p", "4k"])]
+                            preferred_1080p = [f for f in files if "1080p" in f.get("name", "").lower()]
+                            target_file = preferred_4k[0] if preferred_4k else (preferred_1080p[0] if preferred_1080p else files[0])
+                            f_name = target_file.get("name", "episode.mp4")
+                            dest = t_folder / f_name
+                            dl_url = target_file.get("download_url")
+                            tok = target_file.get("token")
+                            mark_fex_seen(user_chat, share_key, all_share_names)
+                            if dl_url:
+                                ep_detected = post.get("ep_num")
+                                if not ep_detected:
+                                    m_ep = re.search(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]", f_name)
+                                    ep_detected = int(m_ep.group(1)) if m_ep else 1
+                                if platform.system() != "Darwin":
+                                    cmd_payload = json.dumps({
+                                        "url": dl_url,
+                                        "token": tok,
+                                        "title": display_title,
+                                        "episode": ep_detected,
+                                        "folder": t_folder.name,
+                                        "filename": dest.name,
+                                        "chat_id": user_chat,
+                                        "msg_id": notify_msg.message_id if notify_msg else None,
+                                        "quality": "4K Ultra HD" if "2160p" in dest.name else "1080p Full HD",
+                                        "dub_sub": "Озвучення + Субтитри"
+                                    })
+                                    queue_mac_command("download_fex", cmd_payload)
+                                    continue
 
-                                    async def on_auto_dl_prog(downloaded: int, total: int):
-                                        if not quiet and tracker.should_update_telegram():
-                                            speed, eta_calc = tracker.calculate_stats(downloaded, total)
-                                            bar_text = render_progress_bar(downloaded, total, speed, eta_calc)
-                                            try:
-                                                await notify_msg.edit_text(
-                                                    f"🔔 <b>Авто-завантаження:</b> <code>{post['title']}</code>{ep_text}\n\n" + bar_text
-                                                )
-                                            except Exception:
-                                                pass
+                                tracker = DownloadProgressTracker(interval_seconds=2.5)
 
-                                    await FexDownloader.download_file(dl_url, dest, token=tok, progress_callback=on_auto_dl_prog)
-                                    set_macos_tag(dest, TAG_NAME, TAG_COLOR)
-                                    set_macos_tag(t_folder, TAG_NAME, TAG_COLOR)
-                                    f_key = register_file(dest)
-
-                                    if quiet:
-                                        add_to_digest_queue(user_chat, post["title"], post.get("ep_num"), str(dest))
+                                async def on_auto_dl_prog(downloaded: int, total: int):
+                                    if not quiet and tracker.should_update_telegram():
+                                        speed, eta_calc = tracker.calculate_stats(downloaded, total)
+                                        bar_text = render_progress_bar(downloaded, total, speed, eta_calc)
                                         try:
-                                            await notify_msg.delete()
+                                            await notify_msg.edit_text(
+                                                f"🔔 <b>Авто-завантаження:</b> <code>{display_title}</code>{ep_text}\n\n" + bar_text
+                                            )
                                         except Exception:
                                             pass
-                                    else:
-                                        await notify_download_finished(
-                                            bot,
-                                            user_chat,
-                                            notify_msg,
-                                            dest,
-                                            post["title"],
-                                            prefix_text=f"🎉 <b>Авто-завантаження завершено! {post['title']}{ep_text} на ноуті!</b>"
-                                        )
+
+                                await FexDownloader.download_file(dl_url, dest, token=tok, progress_callback=on_auto_dl_prog)
+                                set_macos_tag(dest, TAG_NAME, TAG_COLOR)
+                                set_macos_tag(t_folder, TAG_NAME, TAG_COLOR)
+                                f_key = register_file(dest)
+
+                                if quiet:
+                                    add_to_digest_queue(user_chat, display_title, ep_detected, str(dest))
+                                    try:
+                                        await notify_msg.delete()
+                                    except Exception:
+                                        pass
+                                else:
+                                    await notify_download_finished(
+                                        bot,
+                                        user_chat,
+                                        notify_msg,
+                                        dest,
+                                        display_title,
+                                        prefix_text=f"🎉 <b>Авто-завантаження завершено! {display_title}{ep_text} на ноуті!</b>"
+                                    )
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -4340,41 +4380,11 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.delete_webhook(drop_pending_updates=False)
 
-    # Перевірка наявності нового оновлення та відправка Release Notes користувачу
-    release_info = check_for_new_release()
-    if release_info:
-        # Знаходимо ID отримувачів (з ALLOWED_USERS або з активних користувачів БД)
-        target_recipients = set(ALLOWED_USERS)
-        target_recipients.add(453079694)
-        try:
-            with sqlite3.connect(DB_PATH) as conn:
-                for r in conn.execute("SELECT DISTINCT chat_id FROM anime_subscriptions"):
-                    target_recipients.add(r[0])
-                for r in conn.execute("SELECT DISTINCT chat_id FROM offline_download_queue"):
-                    target_recipients.add(r[0])
-        except Exception:
-            pass
-
-        notes_str = "\n".join(f"• {n}" for n in release_info["notes"])
-        update_text = (
-            f"🚀 <b>Гей! Вийшло свіже оновлення:</b> <code>v{release_info['version']}</code>\n"
-            f"<i>Коміт: #{release_info.get('git_hash', 'latest')}</i>\n\n"
-            f"✨ <b>Що нового та покращеного:</b>\n"
-            f"{notes_str}\n\n"
-            "💡 <i>Бот автоматично оновився та перезапустився у фоні без переривання роботи.</i>"
-        )
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🛰 Відкрити моніторинг", callback_data="track_refresh")],
-                [InlineKeyboardButton(text="📁 Переглянути аніме", callback_data="refresh_list")]
-            ]
-        )
-        for user_id in target_recipients:
-            try:
-                await bot.send_message(chat_id=user_id, text=update_text, reply_markup=kb)
-                logger.info(f"Надіслано сповіщення про оновлення користувачу {user_id}")
-            except Exception as ex_rel:
-                logger.error(f"Не вдалося надіслати сповіщення про оновлення користувачу {user_id}: {ex_rel}")
+    # Оновлюємо версію у БД тихо, без розсилки сервісних повідомлень при деплої
+    try:
+        check_for_new_release()
+    except Exception:
+        pass
 
     # Запускаємо фонові монітори
     asyncio.create_task(mac_sleep_watchdog(bot))

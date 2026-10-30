@@ -83,7 +83,7 @@ def init_channel_monitor_db():
                     quiet_start INTEGER DEFAULT 9,
                     quiet_end INTEGER DEFAULT 18,
                     quiet_end_min INTEGER DEFAULT 30,
-                    auto_binge_limit INTEGER DEFAULT 2
+                    auto_binge_limit INTEGER DEFAULT 0
                 )
             """)
             conn.execute("""
@@ -117,10 +117,10 @@ def get_user_settings(chat_id: int) -> Dict[str, Any]:
             "quiet_start": 9,
             "quiet_end": 18,
             "quiet_end_min": 30,
-            "auto_binge_limit": 2
+            "auto_binge_limit": 0
         }
         conn.execute(
-            "INSERT OR IGNORE INTO user_settings (chat_id, quiet_mode, quiet_start, quiet_end, quiet_end_min, auto_binge_limit) VALUES (?, 0, 9, 18, 30, 2)",
+            "INSERT OR IGNORE INTO user_settings (chat_id, quiet_mode, quiet_start, quiet_end, quiet_end_min, auto_binge_limit) VALUES (?, 0, 9, 18, 30, 0)",
             (chat_id,)
         )
         conn.commit()
@@ -178,18 +178,25 @@ def clear_pending_digest(chat_id: int):
         conn.commit()
 
 
+def normalize_title_for_match(title: str) -> str:
+    """Нормалізує назву аніме для надійного порівняння (ігнорує теги [РГ], дужки, тире, апострофи та номери сезонів)."""
+    if not title:
+        return ""
+    t = re.sub(r"\[.*?\]|\(.*?\)", " ", title)
+    t = re.sub(r"\b(\d+|[IVXLCDM]+)\s*(?:сезон|season)?\b", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"[^\w\s]", " ", t, flags=re.UNICODE)
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
+
+
 def add_subscription(chat_id: int, title: str, channel: str = "ridnyiholos", pref_type: str = "any") -> int:
     """Додає або оновлює підписку на тайтл із фільтром (dub, sub, any)."""
     init_channel_monitor_db()
     clean_title = title.strip()
+    existing_sub = get_subscription_by_title(chat_id, clean_title)
     with sqlite3.connect(DB_PATH) as conn:
-        # Перевіряємо чи є вже підписка на схожий тайтл
-        existing = conn.execute(
-            "SELECT id FROM anime_subscriptions WHERE chat_id = ? AND LOWER(title) = LOWER(?)",
-            (chat_id, clean_title)
-        ).fetchone()
-        if existing:
-            sub_id = existing[0]
+        if existing_sub:
+            sub_id = existing_sub["id"]
             conn.execute(
                 "UPDATE anime_subscriptions SET pref_type = ?, channel = ? WHERE id = ?",
                 (pref_type.strip().lower(), channel.strip().lower(), sub_id)
@@ -208,17 +215,15 @@ def add_subscription(chat_id: int, title: str, channel: str = "ridnyiholos", pre
 def set_subscription_sources(chat_id: int, title: str, fex_url: Optional[str] = None, thread_url: Optional[str] = None) -> bool:
     """Зберігає пряме джерело (FEX / гілка медіатеки) для підписки на тайтл."""
     init_channel_monitor_db()
+    existing_sub = get_subscription_by_title(chat_id, title)
+    if not existing_sub:
+        return False
+    sub_id = existing_sub["id"]
     with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT id FROM anime_subscriptions WHERE chat_id = ? AND LOWER(title) = LOWER(?)",
-            (chat_id, title.strip())
-        ).fetchone()
-        if not row:
-            return False
         if fex_url:
-            conn.execute("UPDATE anime_subscriptions SET fex_url = ? WHERE id = ?", (fex_url, row[0]))
+            conn.execute("UPDATE anime_subscriptions SET fex_url = ? WHERE id = ?", (fex_url, sub_id))
         if thread_url:
-            conn.execute("UPDATE anime_subscriptions SET thread_url = ? WHERE id = ?", (thread_url, row[0]))
+            conn.execute("UPDATE anime_subscriptions SET thread_url = ? WHERE id = ?", (thread_url, sub_id))
         conn.commit()
         return True
 
@@ -308,13 +313,15 @@ def get_subscriptions(chat_id: Optional[int] = None) -> List[Dict[str, Any]]:
 
 
 def get_subscription_by_title(chat_id: int, title: str) -> Optional[Dict[str, Any]]:
-    """Знаходить підписку за назвою тайтлу."""
+    """Знаходить підписку за назвою тайтлу (стійке порівняння без дужок, тегів і пунктуації)."""
     init_channel_monitor_db()
-    clean_title_low = title.strip().lower()
+    norm_q = normalize_title_for_match(title)
+    if not norm_q or len(norm_q) < 2:
+        return None
     subs = get_subscriptions(chat_id)
     for s in subs:
-        s_low = s["title"].lower()
-        if s_low in clean_title_low or clean_title_low in s_low:
+        norm_s = normalize_title_for_match(s["title"])
+        if norm_s and (norm_s in norm_q or norm_q in norm_s):
             return s
     return None
 
@@ -426,6 +433,21 @@ def _parse_html_blocks(html: str, channel: str) -> List[Dict[str, Any]]:
             continue
         post_id = int(post_id_m.group(1))
 
+        # Пропускаємо сервісні повідомлення ("Channel created", закріплення тощо)
+        if "tgme_widget_message_service" in block:
+            continue
+
+        # Витягуємо точний час публікації поста
+        post_ts = None
+        time_m = re.search(r'<time[^>]+datetime=\"([^\"]+)\"', block)
+        if time_m:
+            try:
+                dt_str = time_m.group(1)
+                dt_obj = datetime.datetime.fromisoformat(dt_str)
+                post_ts = dt_obj.timestamp()
+            except Exception:
+                post_ts = None
+
         text_m = re.search(r'tgme_widget_message_text[^>]*>(.*?)</div>', block, re.DOTALL)
         raw_html = text_m.group(1) if text_m else ""
         clean_text = unescape(re.sub(r'<[^>]+>', ' ', raw_html)).strip()
@@ -450,21 +472,27 @@ def _parse_html_blocks(html: str, channel: str) -> List[Dict[str, Any]]:
 
         lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
         first_line = lines[0] if lines else ""
-        first_line_clean = re.sub(r"^[^\w\s]+", "", first_line).strip()
+        first_line_clean = re.sub(r"^[^\w\s\[\]]+", "", first_line).strip()
         title_parts = first_line_clean.split("/")
         parsed_title = title_parts[0].strip() if title_parts else first_line_clean
+        parsed_title = re.sub(r"^\[.*?\]\s*", "", parsed_title).strip() or parsed_title
+
+        # Пропускаємо порожні пости та сервісні заголовки
+        if not parsed_title or len(parsed_title) < 2:
+            continue
 
         # Ігноруємо дайджести "доброго ранку", збори та багатотайтлові списки серій
-        if any(ign in parsed_title.lower() for ign in ["доброго ран", "з днюхою", "баночк", "дякуєм", "донателло", "із субтитрами", "із озвученням", "усього"]):
+        if any(ign in parsed_title.lower() for ign in ["channel created", "доброго ран", "з днюхою", "баночк", "дякуєм", "донателло", "із субтитрами", "із озвученням", "усього"]):
             continue
         if "🟣" in clean_text:
             continue
 
-        ep_m = re.search(r"\[(\d+)\s*з|(\d+)\s*сері", clean_text, re.IGNORECASE)
-        ep_num = int(ep_m.group(1) or ep_m.group(2)) if ep_m else None
+        ep_m = re.search(r"\[(\d+)\s*з|(\d+)\s*сері|(?:серія|епізод|ep\.?)\s*#?(\d+)", clean_text, re.IGNORECASE)
+        ep_num = int(ep_m.group(1) or ep_m.group(2) or ep_m.group(3)) if ep_m else None
 
         parsed_posts.append({
             "post_id": post_id,
+            "post_ts": post_ts,
             "channel": channel,
             "title": parsed_title,
             "full_title_line": first_line_clean,

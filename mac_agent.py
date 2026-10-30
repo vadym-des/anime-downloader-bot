@@ -199,47 +199,46 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                 except Exception:
                     pass
 
-            if dest_file.exists() and dest_file.stat().st_size > 10 * 1024 * 1024:
-                logger.info(f"Файл {dest_file.name} вже існує на Mac. Пропуск завантаження.")
-                return True
-
-            logger.info(f"Початок локального завантаження 4K на Mac SSD: {f_name}")
             bot_token = os.environ.get("BOT_TOKEN") or BOT_TOKEN
-            last_tg_update = 0.0
+            if dest_file.exists() and dest_file.stat().st_size > 10 * 1024 * 1024:
+                logger.info(f"Файл {dest_file.name} вже існує на Mac. Пропуск мережевого завантаження, відправляю картку.")
+            else:
+                logger.info(f"Початок локального завантаження 4K на Mac SSD: {f_name}")
+                last_tg_update = 0.0
 
-            async def on_mac_progress(downloaded: int, total: int):
-                nonlocal last_tg_update
-                now = time.time()
-                if (now - last_tg_update) > 2.5 and bot_token and chat_id and msg_id:
-                    last_tg_update = now
-                    pct = (downloaded / total * 100) if total else 0
-                    bar_blocks = int(pct / 10)
-                    bar = "▰" * bar_blocks + "▱" * (10 - bar_blocks)
-                    d_mb = downloaded / (1024 * 1024)
-                    t_mb = total / (1024 * 1024)
-                    text = (
-                        f"🚀 <b>Завантаження відео на Mac (SSD)</b>\n\n"
-                        f"🎬 <b>Аніме:</b> {title}\n"
-                        f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
-                        f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
-                        f"[{bar}] {pct:.1f}%\n"
-                        f"📦 {d_mb:.1f} МБ / {t_mb:.1f} МБ • ⚡️ Швидкісне збереження на SSD"
-                    )
-                    try:
-                        async with aiohttp.ClientSession() as s:
-                            url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
-                            await s.post(url, json={
-                                "chat_id": chat_id,
-                                "message_id": msg_id,
-                                "text": text,
-                                "parse_mode": "HTML"
-                            }, timeout=aiohttp.ClientTimeout(total=2))
-                    except Exception:
-                        pass
+                async def on_mac_progress(downloaded: int, total: int):
+                    nonlocal last_tg_update
+                    now = time.time()
+                    if (now - last_tg_update) > 2.5 and bot_token and chat_id and msg_id:
+                        last_tg_update = now
+                        pct = (downloaded / total * 100) if total else 0
+                        bar_blocks = int(pct / 10)
+                        bar = "▰" * bar_blocks + "▱" * (10 - bar_blocks)
+                        d_mb = downloaded / (1024 * 1024)
+                        t_mb = total / (1024 * 1024)
+                        text = (
+                            f"🚀 <b>Завантаження відео на Mac (SSD)</b>\n\n"
+                            f"🎬 <b>Аніме:</b> {title}\n"
+                            f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
+                            f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
+                            f"[{bar}] {pct:.1f}%\n"
+                            f"📦 {d_mb:.1f} МБ / {t_mb:.1f} МБ • ⚡️ Швидкісне збереження на SSD"
+                        )
+                        try:
+                            async with aiohttp.ClientSession() as s:
+                                url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+                                await s.post(url, json={
+                                    "chat_id": chat_id,
+                                    "message_id": msg_id,
+                                    "text": text,
+                                    "parse_mode": "HTML"
+                                }, timeout=aiohttp.ClientTimeout(total=2))
+                        except Exception:
+                            pass
 
-            await FexDownloader.download_file(dl_url, dest_file, token=tok, progress_callback=on_mac_progress)
-            set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
-            set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+                await FexDownloader.download_file(dl_url, dest_file, token=tok, progress_callback=on_mac_progress)
+                set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
+                set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
 
             # Якщо постер досі не збережено — згенеруємо через ffmpeg з кадру
             if not poster_path.exists():
