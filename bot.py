@@ -2368,14 +2368,30 @@ async def cb_del_all_confirm(callback: CallbackQuery):
     await safe_answer(callback, "Всі аніме та папки видалено!", show_alert=True)
 
 
-def resolve_file(file_key: str, message: Optional[Message] = None) -> Optional[Path]:
-    """Знаходить файл: спочатку в RAM, потім в SQLite, потім за повідомленням, потім у Downloads."""
+def resolve_file(file_key: str, message: Optional[Message] = None) -> Optional[Any]:
+    """Знаходить файл: у пам'яті FILE_REGISTRY, у таблиці mac_local_files (із Mac-агента), або в SQLite."""
     # 1. Швидкий пошук у пам'яті
-    path = FILE_REGISTRY.get(file_key)
-    if path and path.exists():
-        return path
+    item = FILE_REGISTRY.get(file_key)
+    if item:
+        return item
 
-    # 2. Постійна база SQLite (переживає будь-які перезапуски та ребути)
+    # 2. Пошук у таблиці mac_local_files (збережені серії від Mac-агента)
+    if DB_PATH.exists():
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT full_path, file_size FROM mac_local_files WHERE file_key = ?",
+                    (file_key,)
+                ).fetchone()
+                if row:
+                    vf = SyncedVirtualFile(row["full_path"], row["file_size"])
+                    FILE_REGISTRY[file_key] = vf
+                    return vf
+        except Exception as e:
+            logger.debug(f"Помилка пошуку в mac_local_files: {e}")
+
+    # 3. Постійна база SQLite (file_registry)
     if DB_PATH.exists():
         try:
             with sqlite3.connect(DB_PATH) as conn:
@@ -2384,24 +2400,30 @@ def resolve_file(file_key: str, message: Optional[Message] = None) -> Optional[P
                     (file_key,)
                 ).fetchone()
                 if row:
-                    p = Path(row[0])
-                    if p.exists():
+                    p_str = row[0]
+                    # Якщо локально файлу немає (бо ми на Railway), створюємо віртуальний
+                    if not Path(p_str).exists():
+                        vf = SyncedVirtualFile(p_str, 0)
+                        FILE_REGISTRY[file_key] = vf
+                        return vf
+                    else:
+                        p = Path(p_str)
                         FILE_REGISTRY[file_key] = p
                         return p
         except Exception as e:
             logger.debug(f"Помилка пошуку в SQLite: {e}")
 
-    # 3. Відновлення за текстом повідомлення Telegram
+    # 4. Відновлення за текстом повідомлення Telegram
     if message:
         text = message.text or message.caption or ""
 
         # Точний шлях у рядку "Шлях:" (з <code> або без нього)
         path_match = re.search(r"📂\s*(?:<b>)?Шлях:(?:</b>)?\s*(?:<code>)?([^\n<]+)", text)
         if path_match:
-            candidate = Path(path_match.group(1).strip())
-            if candidate.exists() and candidate.is_file():
-                FILE_REGISTRY[file_key] = candidate
-                return candidate
+            candidate_str = path_match.group(1).strip()
+            vf = SyncedVirtualFile(candidate_str, 0)
+            FILE_REGISTRY[file_key] = vf
+            return vf
 
         # Пошук за назвою файлу або тайтлу
         for pattern in (
