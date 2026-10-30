@@ -3,17 +3,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent
 
-# Завантажуємо змінні оточення (спочатку локальний .env, потім сусідній bot-dowloder-shorts/.env)
-for candidate_env in (
-    BASE_DIR / ".env",
-    PROJECT_ROOT / "bot-dowloder-shorts" / ".env",
-    PROJECT_ROOT / ".env",
-):
-    if candidate_env.exists():
-        load_dotenv(dotenv_path=candidate_env, override=False)
-load_dotenv(override=False)
+# Завантажуємо змінні оточення виключно з локального .env проєкту anime-downloader-bot
+env_file = BASE_DIR / ".env"
+if env_file.exists():
+    load_dotenv(dotenv_path=env_file, override=True)
+else:
+    load_dotenv()
 
 # Токен нового бота (можна вказати в .env як ANIME_BOT_TOKEN або BOT_TOKEN)
 BOT_TOKEN = os.getenv("ANIME_BOT_TOKEN") or os.getenv("BOT_TOKEN", "").strip()
