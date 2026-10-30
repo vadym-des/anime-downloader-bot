@@ -9,6 +9,7 @@ Mac Local Downloader & Library Agent
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -327,11 +328,43 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
     return True
 
 
+def get_posters_base64(folders: List[str]) -> Dict[str, str]:
+    """Збирає poster.jpg (або генерує з кадру) для вказаних папок у форматі base64."""
+    result: Dict[str, str] = {}
+    for folder_name in folders:
+        folder_path = DOWNLOADS_DIR / folder_name
+        if not folder_path.exists() or not folder_path.is_dir():
+            continue
+        poster = folder_path / "poster.jpg"
+        if not poster.exists():
+            # Спробуємо знайти будь-який .thumb.jpg або згенерувати через ffmpeg
+            thumbs = list(folder_path.glob("*.jpg"))
+            if thumbs:
+                poster = thumbs[0]
+            else:
+                vids = [f for f in folder_path.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXTS and not f.name.endswith(".part")]
+                if vids:
+                    try:
+                        subprocess.run([
+                            "/opt/homebrew/bin/ffmpeg", "-y", "-ss", "00:03:00",
+                            "-i", str(vids[0]), "-vframes", "1", "-vf", "scale=640:-1", "-q:v", "3", str(poster)
+                        ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    except Exception:
+                        pass
+        if poster.exists() and poster.stat().st_size > 500:
+            try:
+                result[folder_name] = base64.b64encode(poster.read_bytes()).decode("ascii")
+            except Exception:
+                pass
+    return result
+
+
 async def run_agent_loop():
     logger.info("Запуск локального Mac-агента...")
     logger.info(f"Папка завантажень на Mac: {DOWNLOADS_DIR}")
 
     executed_ids: List[int] = []
+    folders_needing_posters: List[str] = []
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -340,6 +373,8 @@ async def run_agent_loop():
                     device_name, free_gb, uptime_str = get_mac_stats()
                     files = scan_local_anime()
 
+                    posters_payload = get_posters_base64(folders_needing_posters) if folders_needing_posters else None
+
                     payload = {
                         "device_name": device_name,
                         "free_disk_gb": free_gb,
@@ -347,6 +382,7 @@ async def run_agent_loop():
                         "uptime_str": uptime_str,
                         "files": files,
                         "executed_command_ids": executed_ids,
+                        "posters": posters_payload,
                     }
 
                     headers = {
@@ -358,11 +394,12 @@ async def run_agent_loop():
                         f"{SERVER_URL}/api/mac/heartbeat",
                         json=payload,
                         headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=10)
+                        timeout=aiohttp.ClientTimeout(total=15)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             executed_ids.clear()
+                            folders_needing_posters = data.get("missing_posters", [])
                             commands = data.get("commands", [])
                             for cmd in commands:
                                 success = await execute_command(cmd)

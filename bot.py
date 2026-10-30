@@ -132,17 +132,21 @@ def init_registry_db():
         logger.error(f"Помилка створення БД реєстру: {e}")
 
 
-def register_file(file_path: Path) -> str:
+def register_file(file_path: Any) -> str:
     """Реєструє файл у RAM та постійну SQLite базу для збереження після перезапусків."""
-    file_id = uuid.uuid4().hex[:10]
-    resolved = file_path.resolve()
-    FILE_REGISTRY[file_id] = resolved
+    path_str = str(file_path)
+    file_id = hashlib.md5(path_str.encode("utf-8")).hexdigest()[:10]
+    if hasattr(file_path, "_size"):
+        FILE_REGISTRY[file_id] = file_path
+    else:
+        p = Path(path_str)
+        FILE_REGISTRY[file_id] = p.resolve() if p.exists() else file_path
     try:
         init_registry_db()
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO file_registry (file_key, file_path, created_at) VALUES (?, ?, ?)",
-                (file_id, str(resolved), time.time()),
+                (file_id, path_str, time.time()),
             )
             conn.commit()
     except Exception as e:
@@ -222,20 +226,24 @@ def is_file_currently_playing(file_key: str) -> bool:
         return False
 
 
-TITLE_REGISTRY: Dict[str, Path] = {}
+TITLE_REGISTRY: Dict[str, Any] = {}
 
 
-def register_title_folder(folder_path: Path) -> str:
+def register_title_folder(folder_path: Any) -> str:
     """Реєструє папку тайтлу для перегляду згрупованого списку серій."""
-    t_id = "t_" + uuid.uuid4().hex[:8]
-    resolved = folder_path.resolve()
-    TITLE_REGISTRY[t_id] = resolved
+    path_str = str(folder_path)
+    t_id = "t_" + hashlib.md5(path_str.encode("utf-8")).hexdigest()[:8]
+    if hasattr(folder_path, "_files"):
+        TITLE_REGISTRY[t_id] = folder_path
+    else:
+        p = Path(path_str)
+        TITLE_REGISTRY[t_id] = p.resolve() if p.exists() else folder_path
     try:
         init_registry_db()
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO file_registry (file_key, file_path, created_at) VALUES (?, ?, ?)",
-                (t_id, str(resolved), time.time()),
+                (t_id, path_str, time.time()),
             )
             conn.commit()
     except Exception:
@@ -243,8 +251,10 @@ def register_title_folder(folder_path: Path) -> str:
     return t_id
 
 
-def resolve_title_folder(title_key: str, message: Optional[Message] = None) -> Optional[Path]:
-    """Знаходить папку тайтлу за ключем у RAM або SQLite."""
+def resolve_title_folder(title_key: str, message: Optional[Message] = None) -> Optional[Any]:
+    """Знаходить папку тайтлу за ключем у RAM, синхронізованих Mac-файлах або SQLite."""
+    if title_key not in TITLE_REGISTRY:
+        get_grouped_anime()
     path = TITLE_REGISTRY.get(title_key)
     if path and path.exists() and path.is_dir():
         return path
@@ -438,15 +448,27 @@ def build_downloaded_action_keyboard(file_key: str, title: Optional[str] = None,
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_video_thumbnail(video_path: Path) -> Optional[Path]:
+def get_video_thumbnail(video_path: Any) -> Optional[Path]:
     """
     Знаходить найкращу прев'юшку / обкладинку для аніме:
+    0. Синхронізований постер із Mac-агента (для роботи на Railway)
     1. Точне прев'ю з Telegram для цієї серії (<stem>.thumb.jpg)
     2. Офіційний постер аніме в папці тайтлу (poster.jpg, cover.jpg)
     3. Вбудована обкладинка з MKV/MP4 контейнера (attachments)
     4. Кешоване прев'ю
     5. Запасний варіант: стоп-кадр через FFmpeg
     """
+    # 0. Синхронізований постер із Mac-агента
+    folder_name = video_path.parent.name if hasattr(video_path, "parent") and video_path.parent else ""
+    if folder_name:
+        f_hash = hashlib.md5(folder_name.encode("utf-8")).hexdigest()[:12]
+        synced_poster = BASE_DIR / "cache" / "posters" / f"{f_hash}.jpg"
+        if synced_poster.exists() and synced_poster.stat().st_size > 500:
+            return synced_poster
+
+    if hasattr(video_path, "_size") and not Path(str(video_path)).exists():
+        return None
+
     if not video_path.exists() or not video_path.is_file():
         return None
 
@@ -1944,16 +1966,48 @@ def format_compact_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 ** 2):.0f}M"
 
 
-class SyncedVirtualFile:
-    """Обгортка для віддалених файлів з Mac для безпечного отримання розміру та шляху на сервері."""
-    def __init__(self, full_path: str, size: int):
-        self._path = Path(full_path)
+class SyncedVirtualFolder:
+    """Обгортка для віддаленої папки тайтлу з Mac."""
+    def __init__(self, folder_path_str: str, files: Optional[List[Any]] = None):
+        self._path = Path(folder_path_str)
         self.name = self._path.name
         self.parent = self._path.parent
+        self._files: List[Any] = files or []
+
+    def resolve(self):
+        return self
+
+    def __str__(self):
+        return str(self._path)
+
+    def exists(self):
+        return True
+
+    def is_dir(self):
+        return True
+
+    def is_file(self):
+        return False
+
+    def iterdir(self):
+        return iter(self._files)
+
+    def glob(self, pattern: str):
+        return iter(self._files)
+
+
+class SyncedVirtualFile:
+    """Обгортка для віддалених файлів з Mac для безпечного отримання розміру та шляху на сервері."""
+    def __init__(self, full_path: str, size: int, parent_folder: Optional[Any] = None):
+        self._path = Path(full_path)
+        self.name = self._path.name
+        self.stem = self._path.stem
+        self.suffix = self._path.suffix
+        self.parent = parent_folder if parent_folder is not None else self._path.parent
         self._size = size
 
     def resolve(self):
-        return self._path
+        return self
 
     def __str__(self):
         return str(self._path)
@@ -1962,10 +2016,20 @@ class SyncedVirtualFile:
         class _Stat:
             def __init__(self, sz):
                 self.st_size = sz
+                self.st_mtime = 0
         return _Stat(self._size)
 
     def exists(self):
         return True
+
+    def is_file(self):
+        return True
+
+    def is_dir(self):
+        return False
+
+    def with_name(self, name: str):
+        return self._path.with_name(name)
 
 
 def get_grouped_anime() -> Dict[str, List[Any]]:
@@ -1975,15 +2039,19 @@ def get_grouped_anime() -> Dict[str, List[Any]]:
     if synced:
         grouped: Dict[str, List[Any]] = {}
         for folder, files in synced.items():
+            first_p = Path(files[0]["full_path"]) if files else Path(f"/Users/user/Downloads/(Завантажене аніме)/{folder}/video.mkv")
+            v_folder = SyncedVirtualFolder(str(first_p.parent))
             items = []
             for item in files:
-                vf = SyncedVirtualFile(item["full_path"], item.get("file_size", 0))
+                vf = SyncedVirtualFile(item["full_path"], item.get("file_size", 0), parent_folder=v_folder)
                 f_key = item["file_key"]
                 FILE_REGISTRY[f_key] = vf
                 items.append(vf)
+            items.sort(key=lambda x: x.name)
+            v_folder._files = items
+            t_key = "t_" + hashlib.md5(str(v_folder).encode("utf-8")).hexdigest()[:8]
+            TITLE_REGISTRY[t_key] = v_folder
             grouped[folder] = items
-        for t in grouped:
-            grouped[t].sort(key=lambda x: x.name)
         return grouped
 
     # 2. Локальне сканування файлової системи (якщо бот працює локально)
@@ -2318,10 +2386,15 @@ async def cb_del_title_confirm(callback: CallbackQuery):
 
     clean_title = format_anime_display_name(folder_path.name, max_len=50)
     total_size = sum(f.stat().st_size for f in folder_path.glob("*.*") if f.is_file())
-    shutil.rmtree(folder_path, ignore_errors=True)
+    if hasattr(folder_path, "_files") or platform.system() != "Darwin":
+        for f in folder_path.glob("*.*"):
+            queue_mac_command("delete_file", str(f))
+    else:
+        shutil.rmtree(folder_path, ignore_errors=True)
     TITLE_REGISTRY.pop(t_key, None)
 
-    free_gb = get_free_disk_space_gb()
+    mac_state = get_mac_device_state()
+    free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
     confirm_text = (
         f"💥 <b>Тайтл «{clean_title}» успішно видалено!</b>\n\n"
         f"✨ Звільнено: <code>{format_bytes(total_size)}</code>\n"
@@ -2398,27 +2471,42 @@ async def cb_del_all_confirm(callback: CallbackQuery):
 
 
 def resolve_file(file_key: str, message: Optional[Message] = None) -> Optional[Any]:
-    """Знаходить файл: у пам'яті FILE_REGISTRY, у таблиці mac_local_files (із Mac-агента), або в SQLite."""
-    # 1. Швидкий пошук у пам'яті
-    item = FILE_REGISTRY.get(file_key)
-    if item:
-        return item
-
-    # 2. Пошук у таблиці mac_local_files (збережені серії від Mac-агента)
+    """Знаходить файл: у таблиці mac_local_files (із Mac-агента), у пам'яті FILE_REGISTRY, або в SQLite."""
+    # 1. Спершу шукаємо у таблиці mac_local_files (найточніші синхронізовані дані від Mac-агента)
     if DB_PATH.exists():
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
-                    "SELECT full_path, file_size FROM mac_local_files WHERE file_key = ?",
+                    "SELECT full_path, file_size, folder_name FROM mac_local_files WHERE file_key = ?",
                     (file_key,)
                 ).fetchone()
                 if row:
-                    vf = SyncedVirtualFile(row["full_path"], row["file_size"])
-                    FILE_REGISTRY[file_key] = vf
-                    return vf
+                    siblings_rows = conn.execute(
+                        "SELECT file_key, full_path, file_size FROM mac_local_files WHERE folder_name = ? ORDER BY file_name",
+                        (row["folder_name"],)
+                    ).fetchall()
+                    v_folder = SyncedVirtualFolder(str(Path(row["full_path"]).parent))
+                    s_items = []
+                    target_vf = None
+                    for sr in siblings_rows:
+                        svf = SyncedVirtualFile(sr["full_path"], sr["file_size"], parent_folder=v_folder)
+                        FILE_REGISTRY[sr["file_key"]] = svf
+                        s_items.append(svf)
+                        if sr["file_key"] == file_key:
+                            target_vf = svf
+                    v_folder._files = s_items
+                    t_key = "t_" + hashlib.md5(str(v_folder).encode("utf-8")).hexdigest()[:8]
+                    TITLE_REGISTRY[t_key] = v_folder
+                    if target_vf:
+                        return target_vf
         except Exception as e:
             logger.debug(f"Помилка пошуку в mac_local_files: {e}")
+
+    # 2. Швидкий пошук у пам'яті
+    item = FILE_REGISTRY.get(file_key)
+    if item and item.exists():
+        return item
 
     # 3. Постійна база SQLite (file_registry)
     if DB_PATH.exists():

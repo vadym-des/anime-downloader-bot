@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import hashlib
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -17,6 +20,7 @@ logger = logging.getLogger("SyncServer")
 api_app = FastAPI(title="Anime Downloader Mac Sync Bridge")
 
 SYNC_SECRET = os.getenv("MAC_SYNC_SECRET") or BOT_TOKEN[:16]
+POSTERS_DIR = Path(__file__).resolve().parent / "cache" / "posters"
 
 
 class FileItem(BaseModel):
@@ -34,6 +38,7 @@ class HeartbeatPayload(BaseModel):
     uptime_str: str
     files: List[FileItem]
     executed_command_ids: Optional[List[int]] = None
+    posters: Optional[Dict[str, str]] = None
 
 
 @api_app.get("/health")
@@ -59,6 +64,16 @@ async def mac_heartbeat(payload: HeartbeatPayload, x_sync_secret: Optional[str] 
         for cid in payload.executed_command_ids:
             mark_mac_command_done(cid)
 
+    # Зберігаємо передані постери з Mac
+    POSTERS_DIR.mkdir(parents=True, exist_ok=True)
+    if payload.posters:
+        for folder_name, b64_str in payload.posters.items():
+            try:
+                f_hash = hashlib.md5(folder_name.encode("utf-8")).hexdigest()[:12]
+                (POSTERS_DIR / f"{f_hash}.jpg").write_bytes(base64.b64decode(b64_str))
+            except Exception as e:
+                logger.debug(f"Помилка збереження постера для {folder_name}: {e}")
+
     # Зберігаємо актуальний список файлів
     files_data = [f.model_dump() for f in payload.files]
     update_mac_device_state(
@@ -69,9 +84,22 @@ async def mac_heartbeat(payload: HeartbeatPayload, x_sync_secret: Optional[str] 
         files=files_data,
     )
 
+    # Перевіряємо, яких постерів не вистачає на сервері
+    missing_posters = []
+    seen_folders = {f.folder for f in payload.files if f.folder}
+    for folder_name in seen_folders:
+        f_hash = hashlib.md5(folder_name.encode("utf-8")).hexdigest()[:12]
+        p_file = POSTERS_DIR / f"{f_hash}.jpg"
+        if not p_file.exists() or p_file.stat().st_size < 500:
+            missing_posters.append(folder_name)
+
     # Віддаємо нові команди для Mac (наприклад завантаження нової серії чи видалення)
     pending_cmds = get_pending_mac_commands()
-    return {"status": "success", "commands": pending_cmds}
+    return {
+        "status": "success",
+        "commands": pending_cmds,
+        "missing_posters": missing_posters,
+    }
 
 
 async def run_sync_server():
@@ -80,4 +108,3 @@ async def run_sync_server():
     server = uvicorn.Server(config)
     logger.info(f"Запуск FastAPI Mac Sync Bridge на порту {port}...")
     await server.serve()
-
