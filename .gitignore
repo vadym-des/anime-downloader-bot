@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite and session data
+*.db
+*.db-journal
+*.sqlite
+*.session
+*.session-journal
+
+# Environment variables
+.env
+.env.local
+
+# macOS specific
+.DS_Store
+
+# Temporary and downloads
+temp/
+downloads/
+cache/
