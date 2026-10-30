@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -40,6 +41,7 @@ if TELEGRAM_API_ID and TELEGRAM_API_HASH and BOT_TOKEN:
         api_hash=TELEGRAM_API_HASH,
         bot_token=BOT_TOKEN,
         session_dir=BASE_DIR,
+        session_name="mac_agent_mtproto_session",
     )
 
 logging.basicConfig(
@@ -129,6 +131,146 @@ def find_file_on_mac(payload: str) -> Optional[Path]:
     return None
 
 
+def format_eta(seconds: float) -> str:
+    """Форматує залишковий час у зручний вигляд."""
+    if seconds <= 0 or seconds > 86400:
+        return "розрахунок..."
+    sec = int(seconds)
+    if sec < 60:
+        return f"~{sec} сек"
+    mins = sec // 60
+    rem_s = sec % 60
+    return f"~{mins} хв {rem_s:02d} сек"
+
+
+def find_existing_episode_in_folder(target_folder: Path, dest_file: Path, ep_num: int) -> Optional[Path]:
+    """Перевіряє, чи ця серія вже завантажена у папку (навіть під альтернативною назвою)."""
+    if dest_file.exists() and dest_file.stat().st_size > 5 * 1024 * 1024:
+        return dest_file
+    if not target_folder.exists():
+        return None
+    ep_pats = [
+        rf"\[0?{ep_num}\s*(?:з|/|-|\])",
+        rf"S\d+E0?{ep_num}\b",
+        rf"\b0?{ep_num}\s*сері",
+    ]
+    for f in target_folder.iterdir():
+        if f.is_file() and f.suffix.lower() in VIDEO_EXTS and not f.name.endswith(".part"):
+            if f.stat().st_size > 5 * 1024 * 1024:
+                if any(re.search(pat, f.name, re.IGNORECASE) for pat in ep_pats):
+                    return f
+    return None
+
+
+async def edit_tg_status(bot_token: str, chat_id: int, msg_id: Optional[int], text: str):
+    """Надійно оновлює повідомлення статусу в Telegram."""
+    if not (bot_token and chat_id and msg_id):
+        return
+    try:
+        async with aiohttp.ClientSession() as s:
+            url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+            async with s.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                },
+                timeout=aiohttp.ClientTimeout(total=4),
+            ) as resp:
+                if resp.status != 200:
+                    err_body = await resp.text()
+                    if "message is not modified" not in err_body:
+                        logger.warning(f"Telegram editMessageText ({resp.status}): {err_body}")
+    except Exception as e:
+        logger.debug(f"edit_tg_status error: {e}")
+
+
+async def send_completed_anime_card(
+    bot_token: str,
+    chat_id: int,
+    msg_id: Optional[int],
+    dest_file: Path,
+    poster_path: Path,
+    title: str,
+    ep_num: int,
+    quality: str,
+    dub_sub: str,
+):
+    """Надсилає фінальну картку серії з постером та кнопками керування і прибирає повідомлення прогресу."""
+    if not (bot_token and chat_id and dest_file.exists()):
+        return
+
+    size_str = format_bytes(dest_file.stat().st_size)
+    f_key = hashlib.md5(str(dest_file).encode("utf-8")).hexdigest()[:10]
+    card_text = (
+        f"✅ <b>Завантаження завершено!</b>\n\n"
+        f"🎬 <b>{title} [Серія {ep_num}]</b>\n"
+        f"🎞 <b>Якість:</b> {quality}\n\n"
+        f"🔊 <b>Доріжки:</b> {dub_sub}\n"
+        f"🏷 <b>Finder:</b> 🟢 На черзі глянути\n\n"
+        f"📦 <b>Розмір:</b> {size_str}"
+    )
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "▶️ Запустити в плеєрі", "callback_data": f"play:{f_key}"},
+                {"text": "📁 Відкрити у Finder", "callback_data": f"finder:{f_key}"},
+            ],
+            [
+                {"text": f"🗑 Видалити ({size_str})", "callback_data": f"del:{f_key}"},
+            ],
+            [
+                {"text": "⬅️ Назад до списку", "callback_data": "refresh_list"},
+            ],
+        ]
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            if poster_path.exists():
+                data_form = aiohttp.FormData()
+                data_form.add_field("chat_id", str(chat_id))
+                data_form.add_field("caption", card_text)
+                data_form.add_field("parse_mode", "HTML")
+                data_form.add_field("reply_markup", json.dumps(keyboard))
+                with open(poster_path, "rb") as pf:
+                    data_form.add_field("photo", pf.read(), filename="poster.jpg")
+                await s.post(f"https://api.telegram.org/bot{bot_token}/sendPhoto", data=data_form)
+                if msg_id:
+                    try:
+                        await s.post(
+                            f"https://api.telegram.org/bot{bot_token}/deleteMessage",
+                            json={"chat_id": chat_id, "message_id": msg_id},
+                        )
+                    except Exception:
+                        pass
+            else:
+                if msg_id:
+                    await s.post(
+                        f"https://api.telegram.org/bot{bot_token}/editMessageText",
+                        json={
+                            "chat_id": chat_id,
+                            "message_id": msg_id,
+                            "text": card_text,
+                            "parse_mode": "HTML",
+                            "reply_markup": keyboard,
+                        },
+                    )
+                else:
+                    await s.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": card_text,
+                            "parse_mode": "HTML",
+                            "reply_markup": keyboard,
+                        },
+                    )
+    except Exception as e_tg:
+        logger.warning(f"Не вдалося оновити повідомлення в Telegram: {e_tg}")
+
+
 async def execute_command(cmd: Dict[str, Any]) -> bool:
     """Виконує отриману від сервера команду на MacBook."""
     action = cmd.get("action")
@@ -193,13 +335,14 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
             poster_url = data.get("poster_url")
             quality = data.get("quality", "4K Ultra HD")
             dub_sub = data.get("dub_sub", "Озвучення (DUB) або Субтитри (SUB)")
+            ep_num = data.get("episode", 1)
 
             target_folder = DOWNLOADS_DIR / folder_name
             target_folder.mkdir(parents=True, exist_ok=True)
             dest_file = target_folder / f_name
-
-            # Спробуємо завантажити постер
             poster_path = target_folder / "poster.jpg"
+            bot_token = BOT_TOKEN or os.environ.get("ANIME_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
+
             if poster_url and not poster_path.exists():
                 try:
                     async with aiohttp.ClientSession() as s:
@@ -209,48 +352,72 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                 except Exception:
                     pass
 
-            bot_token = os.environ.get("BOT_TOKEN") or BOT_TOKEN
-            if dest_file.exists() and dest_file.stat().st_size > 10 * 1024 * 1024:
-                logger.info(f"Файл {dest_file.name} вже існує на Mac. Пропуск мережевого завантаження, відправляю картку.")
+            existing_ep = find_existing_episode_in_folder(target_folder, dest_file, ep_num)
+            if existing_ep:
+                dest_file = existing_ep
+                logger.info(f"Файл {dest_file.name} вже існує на Mac. Пропуск завантаження, відправляю картку.")
             else:
                 logger.info(f"Початок локального завантаження 4K на Mac SSD: {f_name}")
+                await edit_tg_status(
+                    bot_token,
+                    chat_id,
+                    msg_id,
+                    (
+                        f"📥 <b>Завантаження відео на Mac SSD (FEX.NET)...</b>\n\n"
+                        f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
+                        f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
+                        f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
+                        f"<code>[▱▱▱▱▱▱▱▱▱▱] 1.0%</code>\n"
+                        f"📦 <b>Підключення до сервера FEX.NET...</b>\n"
+                        f"⚡️ <i>Статус: MacAgent прийняв завдання, починаю скачування...</i>"
+                    ),
+                )
                 last_tg_update = 0.0
+                dl_start_ts = time.time()
+                spin_idx = 0
+                spinners = ["⏳", "⚡️", "🚀", "📥"]
 
                 async def on_mac_progress(downloaded: int, total: int):
-                    nonlocal last_tg_update
+                    nonlocal last_tg_update, spin_idx
                     now = time.time()
-                    if (now - last_tg_update) > 2.5 and bot_token and chat_id and msg_id:
+                    if ((now - last_tg_update) >= 2.0 or (total and downloaded >= total)) and bot_token and chat_id and msg_id:
                         last_tg_update = now
                         pct = (downloaded / total * 100) if total else 0
-                        bar_blocks = int(pct / 10)
+                        bar_blocks = min(10, max(0, int(pct / 10)))
                         bar = "▰" * bar_blocks + "▱" * (10 - bar_blocks)
                         d_mb = downloaded / (1024 * 1024)
                         t_mb = total / (1024 * 1024)
+                        elapsed = max(0.5, now - dl_start_ts)
+                        speed_mb = d_mb / elapsed
+                        rem_sec = ((t_mb - d_mb) / speed_mb) if speed_mb > 0.05 and total else 0
+                        eta_str = format_eta(rem_sec)
+                        sp = spinners[spin_idx % len(spinners)]
+                        spin_idx += 1
                         text = (
-                            f"🚀 <b>Завантаження відео на Mac (SSD)</b>\n\n"
-                            f"🎬 <b>Аніме:</b> {title}\n"
+                            f"{sp} <b>Завантаження на Mac SSD (4K / 1080p)...</b>\n\n"
+                            f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
                             f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
                             f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
-                            f"[{bar}] {pct:.1f}%\n"
-                            f"📦 {d_mb:.1f} МБ / {t_mb:.1f} МБ • ⚡️ Швидкісне збереження на SSD"
+                            f"<code>[{bar}] {pct:.1f}%</code>\n"
+                            f"📦 <b>{d_mb:.1f} МБ / {t_mb:.1f} МБ</b>\n"
+                            f"🚀 <b>Швидкість:</b> {speed_mb:.1f} МБ/с • ⏱ <b>Залишилось:</b> {eta_str}"
                         )
-                        try:
-                            async with aiohttp.ClientSession() as s:
-                                url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
-                                await s.post(url, json={
-                                    "chat_id": chat_id,
-                                    "message_id": msg_id,
-                                    "text": text,
-                                    "parse_mode": "HTML"
-                                }, timeout=aiohttp.ClientTimeout(total=2))
-                        except Exception:
-                            pass
+                        await edit_tg_status(bot_token, chat_id, msg_id, text)
 
-                await FexDownloader.download_file(dl_url, dest_file, token=tok, progress_callback=on_mac_progress)
-                set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
-                set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+                try:
+                    await FexDownloader.download_file(dl_url, dest_file, token=tok, progress_callback=on_mac_progress)
+                    set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
+                    set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+                except Exception as e_dl:
+                    logger.error(f"Помилка FEX завантаження на Mac: {e_dl}")
+                    await edit_tg_status(
+                        bot_token,
+                        chat_id,
+                        msg_id,
+                        f"❌ <b>Помилка завантаження на Mac:</b>\n<code>{e_dl}</code>",
+                    )
+                    return True
 
-            # Якщо постер досі не збережено — згенеруємо через ffmpeg з кадру
             if not poster_path.exists():
                 try:
                     subprocess.run([
@@ -261,73 +428,17 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                     pass
 
             logger.info(f"Успішно завантажено на Mac: {dest_file.name} з тегом {TAG_NAME}")
-
-            # Надсилаємо картку аніме в Telegram за ТЗ користувача
-            if bot_token and chat_id:
-                size_str = format_bytes(dest_file.stat().st_size)
-                f_key = hashlib.md5(str(dest_file).encode("utf-8")).hexdigest()[:10]
-                ep_num = data.get("episode", 1)
-
-                card_text = (
-                    f"🎬 <b>{title} [Серія {ep_num}]</b>\n"
-                    f"🎞 <b>Якість:</b> {quality}\n\n"
-                    f"🔊 <b>Доріжки:</b> {dub_sub}\n"
-                    f"🏷 <b>Finder:</b> 🟢 На черзі глянути\n\n"
-                    f"📦 <b>Розмір:</b> {size_str}"
-                )
-
-                keyboard = {
-                    "inline_keyboard": [
-                        [
-                            {"text": "▶️ Запустити в плеєрі", "callback_data": f"play:{f_key}"},
-                            {"text": "📁 Відкрити у Finder", "callback_data": f"finder:{f_key}"}
-                        ],
-                        [
-                            {"text": f"🗑 Видалити ({size_str})", "callback_data": f"del:{f_key}"}
-                        ],
-                        [
-                            {"text": "⬅️ Назад до списку", "callback_data": "refresh_list"}
-                        ]
-                    ]
-                }
-
-                try:
-                    async with aiohttp.ClientSession() as s:
-                        if poster_path.exists():
-                            data_form = aiohttp.FormData()
-                            data_form.add_field("chat_id", str(chat_id))
-                            data_form.add_field("caption", card_text)
-                            data_form.add_field("parse_mode", "HTML")
-                            data_form.add_field("reply_markup", json.dumps(keyboard))
-                            data_form.add_field("photo", open(poster_path, "rb"), filename="poster.jpg")
-                            await s.post(f"https://api.telegram.org/bot{bot_token}/sendPhoto", data=data_form)
-                            if msg_id:
-                                try:
-                                    await s.post(f"https://api.telegram.org/bot{bot_token}/deleteMessage", json={
-                                        "chat_id": chat_id,
-                                        "message_id": msg_id
-                                    })
-                                except Exception:
-                                    pass
-                        else:
-                            if msg_id:
-                                await s.post(f"https://api.telegram.org/bot{bot_token}/editMessageText", json={
-                                    "chat_id": chat_id,
-                                    "message_id": msg_id,
-                                    "text": card_text,
-                                    "parse_mode": "HTML",
-                                    "reply_markup": keyboard
-                                })
-                            else:
-                                await s.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={
-                                    "chat_id": chat_id,
-                                    "text": card_text,
-                                    "parse_mode": "HTML",
-                                    "reply_markup": keyboard
-                                })
-                except Exception as e_tg:
-                    logger.warning(f"Не вдалося оновити повідомлення в Telegram: {e_tg}")
-
+            await send_completed_anime_card(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                msg_id=msg_id,
+                dest_file=dest_file,
+                poster_path=poster_path,
+                title=title,
+                ep_num=ep_num,
+                quality=quality,
+                dub_sub=dub_sub,
+            )
             return True
 
         elif action == "download_tg_media":
@@ -346,56 +457,88 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
             target_folder.mkdir(parents=True, exist_ok=True)
             dest_file = target_folder / f_name
             poster_path = target_folder / "poster.jpg"
-            bot_token = os.environ.get("BOT_TOKEN") or BOT_TOKEN
+            bot_token = BOT_TOKEN or os.environ.get("ANIME_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
 
-            if not mtproto_downloader:
-                logger.error("MTProto не налаштований на MacAgent!")
-                return True
-
-            if dest_file.exists() and dest_file.stat().st_size > 5 * 1024 * 1024:
+            existing_ep = find_existing_episode_in_folder(target_folder, dest_file, ep_num)
+            if existing_ep:
+                dest_file = existing_ep
                 logger.info(f"Файл {dest_file.name} вже існує на Mac. Відправляю картку.")
             else:
+                if not mtproto_downloader:
+                    logger.error("MTProto не налаштований на MacAgent!")
+                    await edit_tg_status(
+                        bot_token,
+                        chat_id,
+                        msg_id,
+                        "❌ <b>Помилка:</b> MTProto клієнт на Mac не налаштований (перевірте TELEGRAM_API_ID та TELEGRAM_API_HASH).",
+                    )
+                    return True
+
                 logger.info(f"Початок MTProto завантаження з Telegram на Mac SSD: {f_name}")
+                await edit_tg_status(
+                    bot_token,
+                    chat_id,
+                    msg_id,
+                    (
+                        f"📥 <b>Завантаження відео з Telegram (MTProto)...</b>\n\n"
+                        f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
+                        f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
+                        f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
+                        f"<code>[▱▱▱▱▱▱▱▱▱▱] 1.0%</code>\n"
+                        f"📦 <b>Підключення до серверів Telegram...</b>\n"
+                        f"⚡️ <i>Статус: MacAgent прийняв завдання, починаю скачування на SSD...</i>"
+                    ),
+                )
                 last_tg_update = 0.0
+                dl_start_ts = time.time()
+                spin_idx = 0
+                spinners = ["⏳", "⚡️", "🚀", "📥"]
 
                 async def on_tg_mac_progress(downloaded: int, total: int):
-                    nonlocal last_tg_update
+                    nonlocal last_tg_update, spin_idx
                     now = time.time()
-                    if (now - last_tg_update) > 2.2 and bot_token and chat_id and msg_id:
+                    if ((now - last_tg_update) >= 2.0 or (total and downloaded >= total)) and bot_token and chat_id and msg_id:
                         last_tg_update = now
                         pct = (downloaded / total * 100) if total else 0
-                        bar_blocks = int(pct / 10)
+                        bar_blocks = min(10, max(0, int(pct / 10)))
                         bar = "▰" * bar_blocks + "▱" * (10 - bar_blocks)
                         d_mb = downloaded / (1024 * 1024)
                         t_mb = total / (1024 * 1024)
+                        elapsed = max(0.5, now - dl_start_ts)
+                        speed_mb = d_mb / elapsed
+                        rem_sec = ((t_mb - d_mb) / speed_mb) if speed_mb > 0.05 and total else 0
+                        eta_str = format_eta(rem_sec)
+                        sp = spinners[spin_idx % len(spinners)]
+                        spin_idx += 1
                         text = (
-                            f"🚀 <b>Завантаження відео з Telegram (MTProto)</b>\n\n"
+                            f"{sp} <b>Завантаження з Telegram на Mac SSD...</b>\n\n"
                             f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
                             f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
                             f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
-                            f"[{bar}] {pct:.1f}%\n"
-                            f"📦 {d_mb:.1f} МБ / {t_mb:.1f} МБ • ⚡️ Швидкісне збереження на SSD"
+                            f"<code>[{bar}] {pct:.1f}%</code>\n"
+                            f"📦 <b>{d_mb:.1f} МБ / {t_mb:.1f} МБ</b>\n"
+                            f"🚀 <b>Швидкість:</b> {speed_mb:.1f} МБ/с • ⏱ <b>Залишилось:</b> {eta_str}"
                         )
-                        try:
-                            async with aiohttp.ClientSession() as s:
-                                url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
-                                await s.post(url, json={
-                                    "chat_id": chat_id,
-                                    "message_id": msg_id,
-                                    "text": text,
-                                    "parse_mode": "HTML"
-                                }, timeout=aiohttp.ClientTimeout(total=2))
-                        except Exception:
-                            pass
+                        await edit_tg_status(bot_token, chat_id, msg_id, text)
 
-                await mtproto_downloader.download_message_video(
-                    chat_id=chat_id,
-                    message_id=source_msg_id,
-                    destination_path=dest_file,
-                    progress_callback=on_tg_mac_progress,
-                )
-                set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
-                set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+                try:
+                    await mtproto_downloader.download_message_video(
+                        chat_id=chat_id,
+                        message_id=source_msg_id,
+                        destination_path=dest_file,
+                        progress_callback=on_tg_mac_progress,
+                    )
+                    set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
+                    set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+                except Exception as e_tg_dl:
+                    logger.error(f"Помилка MTProto завантаження на Mac: {e_tg_dl}")
+                    await edit_tg_status(
+                        bot_token,
+                        chat_id,
+                        msg_id,
+                        f"❌ <b>Помилка завантаження з Telegram на Mac:</b>\n<code>{e_tg_dl}</code>",
+                    )
+                    return True
 
             if not poster_path.exists():
                 try:
@@ -406,67 +549,17 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                 except Exception:
                     pass
 
-            if bot_token and chat_id and dest_file.exists():
-                size_str = format_bytes(dest_file.stat().st_size)
-                f_key = hashlib.md5(str(dest_file).encode("utf-8")).hexdigest()[:10]
-                card_text = (
-                    f"🎬 <b>{title} [Серія {ep_num}]</b>\n"
-                    f"🎞 <b>Якість:</b> {quality}\n\n"
-                    f"🔊 <b>Доріжки:</b> {dub_sub}\n"
-                    f"🏷 <b>Finder:</b> 🟢 На черзі глянути\n\n"
-                    f"📦 <b>Розмір:</b> {size_str}"
-                )
-                keyboard = {
-                    "inline_keyboard": [
-                        [
-                            {"text": "▶️ Запустити в плеєрі", "callback_data": f"play:{f_key}"},
-                            {"text": "📁 Відкрити у Finder", "callback_data": f"finder:{f_key}"}
-                        ],
-                        [
-                            {"text": f"🗑 Видалити ({size_str})", "callback_data": f"del:{f_key}"}
-                        ],
-                        [
-                            {"text": "⬅️ Назад до списку", "callback_data": "refresh_list"}
-                        ]
-                    ]
-                }
-                try:
-                    async with aiohttp.ClientSession() as s:
-                        if poster_path.exists():
-                            data_form = aiohttp.FormData()
-                            data_form.add_field("chat_id", str(chat_id))
-                            data_form.add_field("caption", card_text)
-                            data_form.add_field("parse_mode", "HTML")
-                            data_form.add_field("reply_markup", json.dumps(keyboard))
-                            data_form.add_field("photo", open(poster_path, "rb"), filename="poster.jpg")
-                            await s.post(f"https://api.telegram.org/bot{bot_token}/sendPhoto", data=data_form)
-                            if msg_id:
-                                try:
-                                    await s.post(f"https://api.telegram.org/bot{bot_token}/deleteMessage", json={
-                                        "chat_id": chat_id,
-                                        "message_id": msg_id
-                                    })
-                                except Exception:
-                                    pass
-                        else:
-                            if msg_id:
-                                await s.post(f"https://api.telegram.org/bot{bot_token}/editMessageText", json={
-                                    "chat_id": chat_id,
-                                    "message_id": msg_id,
-                                    "text": card_text,
-                                    "parse_mode": "HTML",
-                                    "reply_markup": keyboard
-                                })
-                            else:
-                                await s.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={
-                                    "chat_id": chat_id,
-                                    "text": card_text,
-                                    "parse_mode": "HTML",
-                                    "reply_markup": keyboard
-                                })
-                except Exception as e_tg:
-                    logger.warning(f"Не вдалося оновити повідомлення в Telegram: {e_tg}")
-
+            await send_completed_anime_card(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                msg_id=msg_id,
+                dest_file=dest_file,
+                poster_path=poster_path,
+                title=title,
+                ep_num=ep_num,
+                quality=quality,
+                dub_sub=dub_sub,
+            )
             return True
 
     except Exception as e:

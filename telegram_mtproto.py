@@ -16,11 +16,18 @@ class TelegramMtprotoDownloader:
     Знімає обмеження HTTP Bot API у 20 МБ (дозволяє до 2000 МБ / 2 ГБ).
     """
 
-    def __init__(self, api_id: int, api_hash: str, bot_token: str, session_dir: Path):
+    def __init__(
+        self,
+        api_id: int,
+        api_hash: str,
+        bot_token: str,
+        session_dir: Path,
+        session_name: str = "bot_mtproto_session",
+    ):
         self.api_id = api_id
         self.api_hash = api_hash
         self.bot_token = bot_token
-        self.session_path = str(session_dir / "bot_mtproto_session")
+        self.session_path = str(session_dir / session_name)
         self.client: Optional[TelegramClient] = None
         self._lock = asyncio.Lock()
 

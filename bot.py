@@ -1947,11 +1947,12 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
             })
             queue_mac_command("download_fex", cmd_payload)
             await status_msg.edit_text(
-                f"⏳ <b>Завдання передано на Mac!</b>\n\n"
-                f"🎬 <b>{title}</b> [Серія {ep_num}]\n"
-                f"📄 <code>{f_name}</code>\n"
-                f"📂 Папка: <code>(Завантажене аніме)/{clean_t}</code>\n\n"
-                f"🍏 <b>Mac розпочинає пряме збереження у 4K на SSD...</b>"
+                f"📥 <b>Завантаження з FEX.NET на Mac SSD</b>\n\n"
+                f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
+                f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
+                f"📂 <b>Папка:</b> <code>(Завантажене аніме)/{clean_t}</code>\n\n"
+                f"<code>[▱▱▱▱▱▱▱▱▱▱] 0.0%</code>\n"
+                f"🔄 <i>Статус: Передача завдання на MacAgent (очікування ~2-5 сек)...</i>"
             )
             return
 
@@ -3151,11 +3152,13 @@ async def handle_media_file(message: Message, bot: Bot):
     # Якщо бот працює на сервері Linux (Railway) — передаємо завантаження важкого Telegram-файлу напряму на Mac через MTProto!
     if platform.system() != "Darwin":
         status_msg = await message.reply(
-            f"⏳ <b>Завдання передано на Mac (MTProto)!</b>\n\n"
-            f"🎬 <b>{clean_title}</b> [Серія {ep_num}]\n"
-            f"📄 <code>{filename}</code> ({file_size_mb:.1f} МБ)\n"
-            f"📂 Папка: <code>{target_folder.name}</code>\n\n"
-            f"🍏 <b>Mac розпочинає пряме завантаження з Telegram на SSD без ліміту 20 МБ...</b>"
+            f"📥 <b>Завантаження відео з Telegram (MTProto)</b>\n\n"
+            f"🎬 <b>Аніме:</b> {clean_title} [Серія {ep_num}]\n"
+            f"📄 <b>Файл:</b> <code>{filename}</code>\n"
+            f"📂 <b>Папка:</b> <code>{target_folder.name}</code>\n\n"
+            f"<code>[▱▱▱▱▱▱▱▱▱▱] 0.0%</code>\n"
+            f"📦 <b>0.0 МБ / {file_size_mb:.1f} МБ</b>\n"
+            f"🔄 <i>Статус: З'єднання з MacAgent (очікування ~2-5 сек)...</i>"
         )
         cmd_payload = json.dumps({
             "chat_id": message.chat.id,
@@ -3730,12 +3733,16 @@ async def handle_anime_message(message: Message, bot: Bot):
                         "dub_sub": t_str
                     })
                     queue_mac_command("download_fex", cmd_payload)
+                    t_mb = (total_bytes / (1024 * 1024)) if total_bytes else 0
+                    size_line = f"📦 <b>0.0 МБ / {t_mb:.1f} МБ</b>\n" if t_mb else ""
                     await status_msg.edit_text(
-                        f"⏳ <b>Завдання передано на Mac!</b>\n\n"
-                        f"🎬 <b>{clean_t}</b> [Серія {ep_num or 1}]\n"
-                        f"📄 <code>{file_name}</code>\n"
-                        f"📂 Папка: <code>{target_folder.name}</code>\n\n"
-                        f"🍏 <b>Mac розпочинає пряме збереження у 4K на SSD (папка «(Завантажене аніме)»)...</b>"
+                        f"📥 <b>Завантаження з FEX.NET на Mac SSD</b>\n\n"
+                        f"🎬 <b>Аніме:</b> {clean_t} [Серія {ep_num or 1}]\n"
+                        f"📄 <b>Файл:</b> <code>{file_name}</code>\n"
+                        f"📂 <b>Папка:</b> <code>{target_folder.name}</code>\n\n"
+                        f"<code>[▱▱▱▱▱▱▱▱▱▱] 0.0%</code>\n"
+                        f"{size_line}"
+                        f"🔄 <i>Статус: Передача завдання на MacAgent (очікування ~2-5 сек)...</i>"
                     )
                     mark_offline_task(task_id, "completed")
                     download_success = True

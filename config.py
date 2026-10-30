@@ -2,15 +2,18 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Завантажуємо змінні оточення (надійно з кореня проекту)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-env_file = PROJECT_ROOT / ".env"
-if env_file.exists():
-    load_dotenv(dotenv_path=env_file)
-else:
-    load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+
+# Завантажуємо змінні оточення (спочатку локальний .env, потім сусідній bot-dowloder-shorts/.env)
+for candidate_env in (
+    BASE_DIR / ".env",
+    PROJECT_ROOT / "bot-dowloder-shorts" / ".env",
+    PROJECT_ROOT / ".env",
+):
+    if candidate_env.exists():
+        load_dotenv(dotenv_path=candidate_env, override=False)
+load_dotenv(override=False)
 
 # Токен нового бота (можна вказати в .env як ANIME_BOT_TOKEN або BOT_TOKEN)
 BOT_TOKEN = os.getenv("ANIME_BOT_TOKEN") or os.getenv("BOT_TOKEN", "").strip()
