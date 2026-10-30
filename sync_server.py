@@ -41,6 +41,14 @@ async def health_check():
     return {"status": "ok", "service": "anime-mac-bridge"}
 
 
+@api_app.get("/api/mac/debug")
+async def debug_mac(x_sync_secret: Optional[str] = Header(None)):
+    from mac_sync_schema import get_mac_device_state, get_synced_mac_files
+    st = get_mac_device_state()
+    fl = get_synced_mac_files()
+    return {"state": st, "files_count": sum(len(v) for v in fl.values()), "folders": list(fl.keys())}
+
+
 @api_app.post("/api/mac/heartbeat")
 async def mac_heartbeat(payload: HeartbeatPayload, x_sync_secret: Optional[str] = Header(None)):
     if x_sync_secret != SYNC_SECRET:
