@@ -1053,15 +1053,19 @@ async def build_anime_card(chat_id: int, title: str) -> Tuple[str, InlineKeyboar
     else:
         status_badge = "⚪️ <b>Статус:</b> <i>Не підписані на сповіщення</i>"
 
-    text = (
-        f"🎬 <b>Картка аніме: «{clean_title}»</b>\n\n"
-        f"📡 <b>Канал релізів:</b> @ridnyiholos\n"
-        f"{delivery_badge}"
-        f"{tracks_str}"
-        f"{ep_count_text}\n"
-        f"{status_badge}\n\n"
-        "👇 <b>Оберіть налаштування або серію для завантаження:</b>"
-    )
+    parts = [
+        f"🎬 <b>Картка аніме: «{clean_title}»</b>",
+        f"📡 <b>Канал релізів:</b> @ridnyiholos",
+        delivery_badge.strip(),
+    ]
+    if tracks_str.strip():
+        parts.append(tracks_str.strip())
+    if ep_count_text.strip():
+        parts.append(ep_count_text.strip())
+    parts.append(status_badge)
+    parts.append("👇 <b>Оберіть налаштування або серію для завантаження:</b>")
+
+    text = "\n\n".join(parts)
 
     kb_rows = [
         [
