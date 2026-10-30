@@ -1907,28 +1907,51 @@ def format_compact_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 ** 2):.0f}M"
 
 
-def get_grouped_anime() -> Dict[str, List[Path]]:
+class SyncedVirtualFile:
+    """Обгортка для віддалених файлів з Mac для безпечного отримання розміру та шляху на сервері."""
+    def __init__(self, full_path: str, size: int):
+        self._path = Path(full_path)
+        self.name = self._path.name
+        self.parent = self._path.parent
+        self._size = size
+
+    def resolve(self):
+        return self._path
+
+    def __str__(self):
+        return str(self._path)
+
+    def stat(self):
+        class _Stat:
+            def __init__(self, sz):
+                self.st_size = sz
+        return _Stat(self._size)
+
+    def exists(self):
+        return True
+
+
+def get_grouped_anime() -> Dict[str, List[Any]]:
     """Групує всі завантажені відеофайли за папками тайтлів (підтримує Mac-синхронізацію)."""
     # 1. Якщо є синхронізовані дані з Mac-агента — беремо їх
     synced = get_synced_mac_files()
     if synced:
-        grouped: Dict[str, List[Path]] = {}
+        grouped: Dict[str, List[Any]] = {}
         for folder, files in synced.items():
-            paths = []
+            items = []
             for item in files:
-                p = Path(item["full_path"])
-                # Реєструємо файл під його стабільним ключем
+                vf = SyncedVirtualFile(item["full_path"], item.get("file_size", 0))
                 f_key = item["file_key"]
-                FILE_REGISTRY[f_key] = p
-                paths.append(p)
-            grouped[folder] = paths
+                FILE_REGISTRY[f_key] = vf
+                items.append(vf)
+            grouped[folder] = items
         for t in grouped:
             grouped[t].sort(key=lambda x: x.name)
         return grouped
 
     # 2. Локальне сканування файлової системи (якщо бот працює локально)
     videos = get_all_downloaded_videos()
-    grouped: Dict[str, List[Path]] = {}
+    grouped: Dict[str, List[Any]] = {}
     for v in videos:
         folder_name = v.parent.name if v.parent != DOWNLOADS_DIR else "Різне"
         grouped.setdefault(folder_name, []).append(v)
@@ -1939,9 +1962,10 @@ def get_grouped_anime() -> Dict[str, List[Path]]:
     return grouped
 
 
-def build_cleanup_message_text(grouped_anime: Dict[str, List[Path]], total_size: int) -> str:
+def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: int) -> str:
     """Формує чистий список серій та тайтлів без зайвого візуального сміття."""
-    free_gb = get_free_disk_space_gb()
+    mac_state = get_mac_device_state()
+    free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
     total_episodes = sum(len(files) for files in grouped_anime.values())
     titles_count = len(grouped_anime)
 
@@ -1965,7 +1989,7 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Path]], total_size:
     return "\n".join(lines)
 
 
-def build_cleanup_keyboard(grouped_anime: Dict[str, List[Path]], total_size: int) -> InlineKeyboardMarkup:
+def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int) -> InlineKeyboardMarkup:
     """Будує інтерактивну клавіатуру: групує серії за тайтлами (100% ширини)."""
     keyboard_rows = []
 
