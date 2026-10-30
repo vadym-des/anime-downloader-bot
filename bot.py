@@ -31,6 +31,13 @@ from aiogram.types import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import aiohttp
+from mac_sync_schema import (
+    init_mac_sync_db,
+    get_mac_device_state,
+    get_synced_mac_files,
+    queue_mac_command,
+)
+from sync_server import run_sync_server
 from channel_monitor import (
     init_channel_monitor_db,
     add_subscription,
@@ -840,15 +847,30 @@ async def cmd_status(message: Message):
     if not is_user_allowed(message.from_user.id):
         return
 
-    uptime_sec = int(time.time() - START_TIME)
-    uptime_str = f"{uptime_sec // 3600}год {(uptime_sec % 3600) // 60}хв {uptime_sec % 60}с"
-    free_gb = get_free_disk_space_gb()
+    # Перевіряємо стан Mac-агента
+    mac_state = get_mac_device_state()
+    if mac_state:
+        status_dot = "🟢" if mac_state.get("is_online") else "💤"
+        status_text = "Активний (Підключено)" if mac_state.get("is_online") else "Спить / Офлайн (Черга активна)"
+        device_name = mac_state.get("device_name", "MacBook Pro")
+        free_gb = mac_state.get("free_disk_gb", 0.0)
+        uptime_str = mac_state.get("uptime_str", "—")
+        folder_str = mac_state.get("downloads_folder", str(DOWNLOADS_DIR))
+    else:
+        status_dot = "🟡"
+        status_text = "Очікування першого підключення Mac"
+        device_name = "MacBook"
+        free_gb = get_free_disk_space_gb()
+        uptime_sec = int(time.time() - START_TIME)
+        uptime_str = f"{uptime_sec // 3600}год {(uptime_sec % 3600) // 60}хв {uptime_sec % 60}с"
+        folder_str = str(DOWNLOADS_DIR)
 
     await message.reply(
-        f"🖥 <b>Стан бота на ноутбуці:</b>\n\n"
-        f"🟢 <b>Статус:</b> Активний (Uptime: {uptime_str})\n"
-        f"💾 <b>Вільне місце:</b> <code>{free_gb:.1f} ГБ</code>\n"
-        f"📂 <b>Папка:</b> <code>{DOWNLOADS_DIR}</code>\n"
+        f"🖥 <b>Стан вашого Mac ({device_name}):</b>\n\n"
+        f"{status_dot} <b>Зв'язок:</b> {status_text}\n"
+        f"⏱ <b>Uptime:</b> {uptime_str}\n"
+        f"💾 <b>Вільне місце на SSD:</b> <code>{free_gb:.1f} ГБ</code>\n"
+        f"📂 <b>Локальна папка:</b> <code>{folder_str}</code>\n"
         f"🏷 <b>Тег Finder:</b> 🟢 {TAG_NAME}",
         reply_markup=get_main_reply_keyboard(),
     )
@@ -1886,7 +1908,25 @@ def format_compact_size(size_bytes: int) -> str:
 
 
 def get_grouped_anime() -> Dict[str, List[Path]]:
-    """Групує всі завантажені відеофайли за папками тайтлів."""
+    """Групує всі завантажені відеофайли за папками тайтлів (підтримує Mac-синхронізацію)."""
+    # 1. Якщо є синхронізовані дані з Mac-агента — беремо їх
+    synced = get_synced_mac_files()
+    if synced:
+        grouped: Dict[str, List[Path]] = {}
+        for folder, files in synced.items():
+            paths = []
+            for item in files:
+                p = Path(item["full_path"])
+                # Реєструємо файл під його стабільним ключем
+                f_key = item["file_key"]
+                FILE_REGISTRY[f_key] = p
+                paths.append(p)
+            grouped[folder] = paths
+        for t in grouped:
+            grouped[t].sort(key=lambda x: x.name)
+        return grouped
+
+    # 2. Локальне сканування файлової системи (якщо бот працює локально)
     videos = get_all_downloaded_videos()
     grouped: Dict[str, List[Path]] = {}
     for v in videos:
@@ -3804,6 +3844,7 @@ async def main():
     init_offline_queue_db()
     init_channel_monitor_db()
     init_update_db()
+    init_mac_sync_db()
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.delete_webhook(drop_pending_updates=False)
@@ -3849,6 +3890,7 @@ async def main():
     asyncio.create_task(channel_monitoring_loop(bot))
     asyncio.create_task(fex_share_watch_loop(bot))
     asyncio.create_task(auto_reload_watcher())
+    asyncio.create_task(run_sync_server())
 
     logger.info("Аніме-бот успішно запущений і готовий до роботи!")
     await dp.start_polling(bot)
