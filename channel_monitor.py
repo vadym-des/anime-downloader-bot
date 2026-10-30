@@ -212,6 +212,13 @@ def add_subscription(chat_id: int, title: str, channel: str = "ridnyiholos", pre
             return cursor.lastrowid
 
 
+def normalize_telegram_url(url: Optional[str]) -> Optional[str]:
+    """Виправляє посилання виду https://t.me/c/mediareser/12051 -> https://t.me/mediareser/12051 (оскільки /c/ у Telegram працює лише з числовим ID чату, а з username викликає помилку 'Ви не є учасником чату')."""
+    if not url:
+        return url
+    return re.sub(r"https?://t\.me/c/([a-zA-Z][a-zA-Z0-9_]*)/", r"https://t.me/\1/", url.strip())
+
+
 def set_subscription_sources(chat_id: int, title: str, fex_url: Optional[str] = None, thread_url: Optional[str] = None) -> bool:
     """Зберігає пряме джерело (FEX / гілка медіатеки) для підписки на тайтл."""
     init_channel_monitor_db()
@@ -219,6 +226,7 @@ def set_subscription_sources(chat_id: int, title: str, fex_url: Optional[str] = 
     if not existing_sub:
         return False
     sub_id = existing_sub["id"]
+    thread_url = normalize_telegram_url(thread_url)
     with sqlite3.connect(DB_PATH) as conn:
         if fex_url:
             conn.execute("UPDATE anime_subscriptions SET fex_url = ? WHERE id = ?", (fex_url, sub_id))

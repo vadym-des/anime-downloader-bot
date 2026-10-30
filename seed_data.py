@@ -16,7 +16,7 @@ logger = logging.getLogger("SeedData")
 # title, pref_type, fex_url, thread_url
 SEED_TITLES: List[Dict[str, Optional[str]]] = [
     {"title": "Вигнаний важкоозброєний лицар стає непереможним завдяки знанням гри", "pref": "dub",
-     "fex": None, "thread": "https://t.me/c/mediareser/364"},
+     "fex": "https://fex.net/s/mleyd4o", "thread": "https://t.me/mediareser/364"},
     {"title": "Маг, що повернувся, — особливий", "pref": "dub",
      "fex": "https://fex.net/s/rntczlx", "thread": None},
     {"title": "Я переродився гобліном, питання є?", "pref": "dub",
@@ -29,7 +29,7 @@ SEED_TITLES: List[Dict[str, Optional[str]]] = [
      "fex": "https://fex.net/s/dbkffm5", "thread": None},
     # Ао Аші — виходить тільки із субтитрами [РГ SUB] у медіатеці
     {"title": "Ао Аші", "pref": "sub",
-     "fex": None, "thread": "https://t.me/c/mediareser/12051"},
+     "fex": None, "thread": "https://t.me/mediareser/12051"},
     {"title": "З’явився дикий останній бос", "pref": "dub",
      "fex": "https://fex.net/s/klakz3l", "thread": None},
     {"title": "Військові хроніки Ромелії", "pref": "dub",

@@ -43,6 +43,7 @@ from sync_server import run_sync_server
 from channel_monitor import (
     init_channel_monitor_db,
     normalize_title_for_match,
+    normalize_telegram_url,
     add_subscription,
     get_subscriptions,
     get_subscription_by_title,
@@ -1030,7 +1031,7 @@ async def build_anime_card(chat_id: int, title: str) -> Tuple[str, InlineKeyboar
 
     has_episodes = False
     has_fex = bool(sub and sub.get("fex_url"))
-    media_url = sub.get("thread_url") if sub else None
+    media_url = normalize_telegram_url(sub.get("thread_url")) if sub else None
     ep_count_text = ""
     tracks_str = ""
 
@@ -1873,14 +1874,14 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
                 target_post = p
                 break
 
-        media_link = sub.get("thread_url") if sub else None
+        media_link = normalize_telegram_url(sub.get("thread_url")) if sub else None
         if not media_link and target_post:
             for l_lbl, l_url in target_post.get("links", []):
                 if "mediareser" in l_url or "t.me" in l_url:
-                    media_link = l_url
+                    media_link = normalize_telegram_url(l_url)
                     break
         if not media_link:
-            media_link = cat_item.get("media_url")
+            media_link = normalize_telegram_url(cat_item.get("media_url"))
 
         msg_text = (
             f"📲 <b>Серія {ep_num} наразі доступна з субтитрами в онлайн-медіатеці Telegram!</b>\n\n"
@@ -3547,7 +3548,7 @@ async def handle_anime_message(message: Message, bot: Bot):
     has_any_fex = any(FexDownloader.extract_share_key(u) for _, u in sorted_candidates)
     mediareser_urls = [u for _, u in sorted_candidates if "mediareser" in u.lower()]
     if not has_any_fex and mediareser_urls and title and not message.video and not message.document:
-        m_url = mediareser_urls[0]
+        m_url = normalize_telegram_url(mediareser_urls[0])
         detected_pref = detect_pref_from_text(raw_text) or detect_pref_from_text(title) or "sub"
         clean_sub_title = re.sub(r"\(\d+\s*сезон\)", "", title, flags=re.IGNORECASE).strip() or title
         existing_sub = get_subscription_by_title(message.chat.id, clean_sub_title)
@@ -4099,7 +4100,7 @@ async def channel_monitoring_loop(bot: Bot):
 
                     # ВАРІАНТ 1: Тайтл з Медіатеки (лише онлайн субтитри)
                     if not has_fex_link:
-                        tg_url = media_tg_link or matched_sub.get("thread_url") or f"https://t.me/{ch}/{pid}"
+                        tg_url = normalize_telegram_url(media_tg_link or matched_sub.get("thread_url") or f"https://t.me/{ch}/{pid}")
                         notify_text = (
                             f"🔔 <b>Вийшла нова серія:</b> <code>{display_title}</code>{ep_text}{type_text}!\n"
                             f"📡 <i>Канал:</i> @{ch}\n\n"
