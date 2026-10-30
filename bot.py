@@ -812,13 +812,20 @@ async def cmd_start(message: Message):
         await message.reply("⛔️ Вибачте, у вас немає доступу до цього бота.")
         return
 
-    free_gb = get_free_disk_space_gb()
+    mac_state = get_mac_device_state()
+    if mac_state:
+        free_gb = mac_state.get("free_disk_gb", 0.0)
+        folder_str = mac_state.get("downloads_folder", str(DOWNLOADS_DIR))
+    else:
+        free_gb = get_free_disk_space_gb()
+        folder_str = str(DOWNLOADS_DIR)
+
     text = (
         "👋 <b>Привіт! Я твій локальний аніме-менеджер.</b>\n\n"
         "💻 Я завантажую та керую твоїми серіями на Mac:\n"
-        f"📂 <b>Папка:</b> <code>{DOWNLOADS_DIR}</code>\n"
+        f"📂 <b>Папка на Mac:</b> <code>{folder_str}</code>\n"
         f"🏷 <b>Тег macOS Finder:</b> 🟢 <i>{TAG_NAME}</i>\n"
-        f"💾 <b>Вільно на диску:</b> <code>{free_gb:.1f} ГБ</code>\n\n"
+        f"💾 <b>Вільно на Mac:</b> <code>{free_gb:.1f} ГБ</code>\n\n"
         "✨ <b>Можливості:</b>\n"
         "• <b>Завантаження:</b> просто перешли пост або лінк — бот стягне 4K/1080p з живим прогрес-баром.\n"
         "• <b>Очищення:</b> під кожною серією є кнопка <i>«🗑 Видалити з ноута»</i>.\n"
@@ -1602,6 +1609,23 @@ async def cb_track_batch_go(callback: CallbackQuery, bot: Bot):
                     continue
 
                 if dl_url:
+                    if platform.system() != "Darwin":
+                        cmd_payload = json.dumps({
+                            "url": dl_url,
+                            "token": tok,
+                            "title": title,
+                            "episode": ep_num,
+                            "folder": clean_t,
+                            "filename": f_name,
+                            "chat_id": chat_id,
+                            "msg_id": status_msg.message_id if status_msg else None,
+                            "quality": "4K Ultra HD" if "2160p" in f_name else "1080p Full HD",
+                            "dub_sub": "Озвучення + Субтитри"
+                        })
+                        queue_mac_command("download_fex", cmd_payload)
+                        success_count += 1
+                        continue
+
                     try:
                         await status_msg.edit_text(
                             f"📥 <b>Пакетне завантаження «{title}» [{idx}/{total_to_dl}]</b>\n"
@@ -3379,6 +3403,38 @@ async def handle_anime_message(message: Message, bot: Bot):
                         except Exception:
                             pass
 
+                # Якщо ми на віддаленому сервері Linux (Railway) -> перенаправляємо завантаження на локальний Mac!
+                if platform.system() != "Darwin":
+                    q_str = "4K Ultra HD" if "2160p" in file_name else ("1080p Full HD" if "1080p" in file_name else "Full HD")
+                    t_str = "Озвучення (DUB)" if ("MVO" in file_name or "Озвуч" in file_name) else ("Субтитри (SUB)" if ("SUB" in file_name or "Саб" in file_name) else "Озвучення + Субтитри")
+                    cmd_payload = json.dumps({
+                        "url": download_url,
+                        "token": token,
+                        "title": title or clean_t,
+                        "episode": ep_num or 1,
+                        "folder": target_folder.name,
+                        "filename": file_name,
+                        "chat_id": message.chat.id,
+                        "msg_id": status_msg.message_id,
+                        "quality": q_str,
+                        "dub_sub": t_str
+                    })
+                    queue_mac_command("download_fex", cmd_payload)
+                    await status_msg.edit_text(
+                        f"⏳ <b>Завдання передано на Mac!</b>\n\n"
+                        f"🎬 <b>{clean_t}</b> [Серія {ep_num or 1}]\n"
+                        f"📄 <code>{file_name}</code>\n"
+                        f"📂 Папка: <code>{target_folder.name}</code>\n\n"
+                        f"🍏 <b>Mac розпочинає пряме збереження у 4K на SSD (папка «(Завантажене аніме)»)...</b>"
+                    )
+                    mark_offline_task(task_id, "completed")
+                    download_success = True
+                    try:
+                        await offer_tracking(bot, message.chat.id, title or clean_t, fex_url=candidate_url)
+                    except Exception as e_off:
+                        logger.debug(f"offer_tracking: {e_off}")
+                    return
+
                 async def _do_fex_dl():
                     return await FexDownloader.download_file(
                         download_url,
@@ -3780,6 +3836,22 @@ async def channel_monitoring_loop(bot: Bot):
                                 dl_url = target_file.get("download_url")
                                 tok = target_file.get("token")
                                 if dl_url:
+                                    if platform.system() != "Darwin":
+                                        cmd_payload = json.dumps({
+                                            "url": dl_url,
+                                            "token": tok,
+                                            "title": post["title"],
+                                            "episode": post.get("ep_num", 1),
+                                            "folder": t_folder.name,
+                                            "filename": dest.name,
+                                            "chat_id": user_chat,
+                                            "msg_id": notify_msg.message_id if notify_msg else None,
+                                            "quality": "4K Ultra HD" if "2160p" in dest.name else "1080p Full HD",
+                                            "dub_sub": "Озвучення + Субтитри"
+                                        })
+                                        queue_mac_command("download_fex", cmd_payload)
+                                        continue
+
                                     tracker = DownloadProgressTracker(interval_seconds=2.5)
 
                                     async def on_auto_dl_prog(downloaded: int, total: int):
@@ -3832,6 +3904,21 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
     if not dl_url:
         return False
     if dest.exists() and dest.stat().st_size > 10 * 1024 * 1024:
+        return True
+
+    if platform.system() != "Darwin":
+        cmd_payload = json.dumps({
+            "url": dl_url,
+            "token": tok,
+            "title": title,
+            "episode": episode,
+            "folder": clean_t,
+            "filename": f_name,
+            "chat_id": chat_id,
+            "quality": "4K Ultra HD" if "2160p" in f_name else "1080p Full HD",
+            "dub_sub": "Озвучення + Субтитри"
+        })
+        queue_mac_command("download_fex", cmd_payload)
         return True
 
     cancel_id = f"auto_{uuid.uuid4().hex[:8]}"

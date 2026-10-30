@@ -3,7 +3,7 @@
 Mac Local Downloader & Library Agent
 Автономно працює на macOS:
 1. Сканує папку ~/Downloads/(Завантажене аніме).
-2. Відправляє список файлів та вільне місце на сервер Railway (кожні 10-20 сек).
+2. Відправляє список файлів та вільне місце на сервер Railway (кожні 5 сек).
 3. Отримує команди від сервера (завантажити серію, видалити файл, відкрити у Finder/IINA).
 4. Завантажує 4K/1080p серії на Mac та ставить кольоровий тег Finder.
 """
@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import BOT_TOKEN, DOWNLOADS_DIR, TAG_NAME, TAG_COLOR
 from fex import FexDownloader
 from tagger import set_macos_tag
+from progress import format_bytes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +41,7 @@ VIDEO_EXTS = (".mkv", ".mp4", ".webm", ".avi", ".mov", ".m4v")
 START_TIME = time.time()
 
 # URL сервера (встановлюється в .env як RAILWAY_API_URL або береться публічний домен Railway)
-SERVER_URL = os.getenv("RAILWAY_API_URL", "").rstrip("/")
+SERVER_URL = os.getenv("RAILWAY_API_URL", "https://anime-downloader-bot-production.up.railway.app").rstrip("/")
 SYNC_SECRET = os.getenv("MAC_SYNC_SECRET") or (BOT_TOKEN[:16] if BOT_TOKEN else "default_secret")
 
 
@@ -81,19 +82,38 @@ def get_mac_stats():
 
 
 def find_file_on_mac(payload: str) -> Optional[Path]:
-    """Гнучко знаходить файл: за прямим шляхом, за назвою всередині папки або через rglob."""
+    """Гнучко та надійно знаходить файл на Mac за шляхом або назвою без збоїв через дужки []."""
+    if not payload:
+        return None
+
     # 1. Прямий шлях
     p = Path(payload)
     if p.exists() and p.is_file():
         return p
 
-    # 2. Якщо шлях містить тильду чи Linux префікс типу /root/...
+    # 2. Якщо шлях починався з /root/Downloads або іншого префіксу (із сервера Linux)
+    if "(Завантажене аніме)" in payload:
+        rel_part = payload.split("(Завантажене аніме)")[-1].lstrip("/\\")
+        candidate = DOWNLOADS_DIR / rel_part
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    # 3. Точний пошук за назвою файлу (без glob, що ламається через [])
     fname = p.name
     if fname:
-        for ext in VIDEO_EXTS:
-            for candidate in DOWNLOADS_DIR.rglob(f"*{fname}*"):
-                if candidate.is_file() and candidate.suffix.lower() in VIDEO_EXTS:
-                    return candidate
+        for root, _, files in os.walk(DOWNLOADS_DIR):
+            if fname in files:
+                return Path(root) / fname
+
+    # 4. Нечіткий пошук
+    if fname:
+        clean_fname = fname.lower()
+        for root, _, files in os.walk(DOWNLOADS_DIR):
+            for f in files:
+                if f.endswith(".part"):
+                    continue
+                if clean_fname in f.lower() or f.lower() in clean_fname:
+                    return Path(root) / f
 
     return None
 
@@ -108,7 +128,10 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
         if action == "reveal_folder":
             target = find_file_on_mac(payload) if payload else DOWNLOADS_DIR
             if target and target.exists():
-                subprocess.run(["open", "-R" if target.is_file() else "", str(target)], check=False)
+                if target.is_file():
+                    subprocess.run(["open", "-R", str(target)], check=False)
+                else:
+                    subprocess.run(["open", str(target)], check=False)
             else:
                 subprocess.run(["open", str(DOWNLOADS_DIR)], check=False)
             return True
@@ -154,20 +177,147 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
             folder_name = data.get("folder") or title
             f_name = data.get("filename") or f"episode_{data.get('episode', 1)}.mkv"
             tok = data.get("token")
+            chat_id = data.get("chat_id")
+            msg_id = data.get("msg_id")
+            poster_url = data.get("poster_url")
+            quality = data.get("quality", "4K Ultra HD")
+            dub_sub = data.get("dub_sub", "Озвучення (DUB) або Субтитри (SUB)")
 
             target_folder = DOWNLOADS_DIR / folder_name
             target_folder.mkdir(parents=True, exist_ok=True)
             dest_file = target_folder / f_name
 
+            # Спробуємо завантажити постер
+            poster_path = target_folder / "poster.jpg"
+            if poster_url and not poster_path.exists():
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.get(poster_url) as resp:
+                            if resp.status == 200:
+                                poster_path.write_bytes(await resp.read())
+                except Exception:
+                    pass
+
             if dest_file.exists() and dest_file.stat().st_size > 10 * 1024 * 1024:
-                logger.info(f"Файл {dest_file.name} вже існує на Mac. Пропуск.")
+                logger.info(f"Файл {dest_file.name} вже існує на Mac. Пропуск завантаження.")
                 return True
 
-            logger.info(f"Початок локального завантаження 4K: {f_name}")
-            await FexDownloader.download_file(dl_url, dest_file, token=tok)
+            logger.info(f"Початок локального завантаження 4K на Mac SSD: {f_name}")
+            bot_token = os.environ.get("BOT_TOKEN") or BOT_TOKEN
+            last_tg_update = 0.0
+
+            async def on_mac_progress(downloaded: int, total: int):
+                nonlocal last_tg_update
+                now = time.time()
+                if (now - last_tg_update) > 2.5 and bot_token and chat_id and msg_id:
+                    last_tg_update = now
+                    pct = (downloaded / total * 100) if total else 0
+                    bar_blocks = int(pct / 10)
+                    bar = "▰" * bar_blocks + "▱" * (10 - bar_blocks)
+                    d_mb = downloaded / (1024 * 1024)
+                    t_mb = total / (1024 * 1024)
+                    text = (
+                        f"🚀 <b>Завантаження відео на Mac (SSD)</b>\n\n"
+                        f"🎬 <b>Аніме:</b> {title}\n"
+                        f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
+                        f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
+                        f"[{bar}] {pct:.1f}%\n"
+                        f"📦 {d_mb:.1f} МБ / {t_mb:.1f} МБ • ⚡️ Швидкісне збереження на SSD"
+                    )
+                    try:
+                        async with aiohttp.ClientSession() as s:
+                            url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+                            await s.post(url, json={
+                                "chat_id": chat_id,
+                                "message_id": msg_id,
+                                "text": text,
+                                "parse_mode": "HTML"
+                            }, timeout=aiohttp.ClientTimeout(total=2))
+                    except Exception:
+                        pass
+
+            await FexDownloader.download_file(dl_url, dest_file, token=tok, progress_callback=on_mac_progress)
             set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
             set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+
+            # Якщо постер досі не збережено — згенеруємо через ffmpeg з кадру
+            if not poster_path.exists():
+                try:
+                    subprocess.run([
+                        "/opt/homebrew/bin/ffmpeg", "-y", "-ss", "00:03:00",
+                        "-i", str(dest_file), "-vframes", "1", "-q:v", "2", str(poster_path)
+                    ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+
             logger.info(f"Успішно завантажено на Mac: {dest_file.name} з тегом {TAG_NAME}")
+
+            # Надсилаємо картку аніме в Telegram за ТЗ користувача
+            if bot_token and chat_id:
+                size_str = format_bytes(dest_file.stat().st_size)
+                f_key = hashlib.md5(str(dest_file).encode("utf-8")).hexdigest()[:10]
+                ep_num = data.get("episode", 1)
+
+                card_text = (
+                    f"🎬 <b>{title} [Серія {ep_num}]</b>\n"
+                    f"🎞 <b>Якість:</b> {quality}\n\n"
+                    f"🔊 <b>Доріжки:</b> {dub_sub}\n"
+                    f"🏷 <b>Finder:</b> 🟢 На черзі глянути\n\n"
+                    f"📦 <b>Розмір:</b> {size_str}"
+                )
+
+                keyboard = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "▶️ Запустити в плеєрі", "callback_data": f"play:{f_key}"},
+                            {"text": "📁 Відкрити у Finder", "callback_data": f"finder:{f_key}"}
+                        ],
+                        [
+                            {"text": f"🗑 Видалити ({size_str})", "callback_data": f"del:{f_key}"}
+                        ],
+                        [
+                            {"text": "⬅️ Назад до списку", "callback_data": "refresh_list"}
+                        ]
+                    ]
+                }
+
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        if poster_path.exists():
+                            data_form = aiohttp.FormData()
+                            data_form.add_field("chat_id", str(chat_id))
+                            data_form.add_field("caption", card_text)
+                            data_form.add_field("parse_mode", "HTML")
+                            data_form.add_field("reply_markup", json.dumps(keyboard))
+                            data_form.add_field("photo", open(poster_path, "rb"), filename="poster.jpg")
+                            await s.post(f"https://api.telegram.org/bot{bot_token}/sendPhoto", data=data_form)
+                            if msg_id:
+                                try:
+                                    await s.post(f"https://api.telegram.org/bot{bot_token}/deleteMessage", json={
+                                        "chat_id": chat_id,
+                                        "message_id": msg_id
+                                    })
+                                except Exception:
+                                    pass
+                        else:
+                            if msg_id:
+                                await s.post(f"https://api.telegram.org/bot{bot_token}/editMessageText", json={
+                                    "chat_id": chat_id,
+                                    "message_id": msg_id,
+                                    "text": card_text,
+                                    "parse_mode": "HTML",
+                                    "reply_markup": keyboard
+                                })
+                            else:
+                                await s.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={
+                                    "chat_id": chat_id,
+                                    "text": card_text,
+                                    "parse_mode": "HTML",
+                                    "reply_markup": keyboard
+                                })
+                except Exception as e_tg:
+                    logger.warning(f"Не вдалося оновити повідомлення в Telegram: {e_tg}")
+
             return True
 
     except Exception as e:
