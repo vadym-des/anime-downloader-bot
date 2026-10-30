@@ -360,32 +360,42 @@ def get_free_disk_space_gb() -> float:
         return 0.0
 
 
-def launch_in_iina(file_path: Path) -> Tuple[bool, str]:
-    """Запускає відеофайл у відеоплеєрі IINA на Mac."""
-    if not file_path.exists():
-        return False, "Файл не знайдено на диску."
+def launch_in_iina(file_path: Any) -> Tuple[bool, str]:
+    """Запускає відеофайл у відеоплеєрі IINA на Mac (підтримує локальний Mac та серверний міст)."""
+    p_str = str(file_path.resolve() if hasattr(file_path, "resolve") else file_path)
+
+    # Якщо ми на сервері Railway — ставимо команду для Mac-агента
+    if not Path(p_str).exists():
+        queue_mac_command("open_iina", p_str)
+        return True, "IINA (надіслано на Mac)"
 
     try:
         iina_app = Path("/Applications/IINA.app")
         if iina_app.exists():
-            subprocess.Popen(["/usr/bin/open", "-a", str(iina_app), str(file_path.resolve())])
+            subprocess.Popen(["/usr/bin/open", "-a", str(iina_app), p_str])
             return True, "IINA"
         else:
-            subprocess.Popen(["/usr/bin/open", str(file_path.resolve())])
+            subprocess.Popen(["/usr/bin/open", p_str])
             return True, "відеоплеєрі"
     except Exception as e:
         logger.error(f"Помилка запуску IINA: {e}")
         return False, str(e)
 
 
-def reveal_in_finder(file_path: Path) -> bool:
+def reveal_in_finder(file_path: Any) -> bool:
     """Відкриває та підсвічує завантажений файл у Finder на Mac."""
+    p_str = str(file_path.resolve() if hasattr(file_path, "resolve") else file_path)
+    if not Path(p_str).exists():
+        queue_mac_command("reveal_folder", p_str)
+        return True
+
     try:
-        if file_path.exists():
-            subprocess.Popen(["/usr/bin/open", "-R", str(file_path.resolve())])
+        p = Path(p_str)
+        if p.exists():
+            subprocess.Popen(["/usr/bin/open", "-R", str(p.resolve())])
             return True
-        elif file_path.parent.exists():
-            subprocess.Popen(["/usr/bin/open", str(file_path.parent.resolve())])
+        elif p.parent.exists():
+            subprocess.Popen(["/usr/bin/open", str(p.parent.resolve())])
             return True
     except Exception as e:
         logger.error(f"Помилка відкриття у Finder: {e}")
@@ -774,17 +784,15 @@ def is_user_allowed(user_id: int) -> bool:
 
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Створює зручне постійне меню внизу екрана, як на скриншотах."""
+    """Створює зручне та мінімалістичне меню внизу екрана за ТЗ v3.0."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(text="📁 Мої аніме"),
-                KeyboardButton(text="🧹 Очистити все"),
+                KeyboardButton(text="🛰 Моніторинг"),
             ],
             [
                 KeyboardButton(text="🖥 Стан ноута"),
-                KeyboardButton(text="🛰 Моніторинг"),
-                KeyboardButton(text="ℹ️ Допомога"),
             ]
         ],
         resize_keyboard=True,
@@ -1962,8 +1970,22 @@ def get_grouped_anime() -> Dict[str, List[Any]]:
     return grouped
 
 
+def extract_episode_number_from_filename(filename: str) -> Optional[int]:
+    """Визначає номер серії з імені файлу чи папки."""
+    m = re.search(r'\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]', filename, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m2 = re.search(r'S\d+E(\d+)', filename, re.IGNORECASE)
+    if m2:
+        return int(m2.group(1))
+    m3 = re.search(r'(\d+)\s*(?:серія|серію|епізод|ep)', filename, re.IGNORECASE)
+    if m3:
+        return int(m3.group(1))
+    return None
+
+
 def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: int) -> str:
-    """Формує чистий список серій та тайтлів без зайвого візуального сміття."""
+    """Формує чистий список серій та тайтлів без зайвого візуального сміття за ТЗ."""
     mac_state = get_mac_device_state()
     free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
     total_episodes = sum(len(files) for files in grouped_anime.values())
@@ -1971,48 +1993,63 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: 
 
     lines = [
         "🎬 <b>Твої завантажені аніме на Mac</b>\n",
-        f"📁 <b>Тайтлів:</b> {titles_count}  •  🎞 <b>Серій:</b> {total_episodes}\n📦 <b>Разом:</b> <code>{format_bytes(total_size)}</code>  •  💾 <b>Вільно:</b> <code>{free_gb:.1f} ГБ</code>\n",
+        f"📁 <b>Тайтлів:</b> {titles_count}  •  🎞 <b>Серій:</b> {total_episodes}",
+        f"📦 <b>Разом:</b> <code>{format_bytes(total_size)}</code>  •  💾 <b>Вільно:</b> <code>{free_gb:.1f} ГБ</code>\n",
         "📋 <b>Список на диску:</b>",
     ]
 
     idx = 1
     for title, files in grouped_anime.items():
-        clean_title = format_anime_display_name(title, max_len=55)
+        clean_title = format_anime_display_name(title, max_len=50)
         has_active = any(is_file_currently_playing(register_file(f)) for f in files)
-        badge = " 👀 <i>(зараз у плеєрі)</i>" if has_active else ""
-        if len(files) > 1:
-            lines.append(f"<b>{idx}.</b> 📁 {clean_title} ({len(files)} серії){badge}")
+        badge = " 👀" if has_active else ""
+
+        # Визначаємо номери серій
+        ep_numbers = []
+        for f in files:
+            ep = extract_episode_number_from_filename(f.name) or extract_episode_number_from_filename(title)
+            if ep and ep not in ep_numbers:
+                ep_numbers.append(ep)
+        ep_numbers.sort()
+
+        if len(ep_numbers) > 1:
+            ep_info = f"(Еп. {', '.join(str(e) for e in ep_numbers)})"
+        elif len(ep_numbers) == 1:
+            ep_info = f"(Еп. {ep_numbers[0]})"
         else:
-            lines.append(f"<b>{idx}.</b> 🎬 {clean_title}{badge}")
+            ep_info = f"({len(files)} серій)"
+
+        lines.append(f"<b>{idx}.</b> 🎬 {clean_title} {ep_info}{badge}")
         idx += 1
 
     return "\n".join(lines)
 
 
 def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int) -> InlineKeyboardMarkup:
-    """Будує інтерактивну клавіатуру: групує серії за тайтлами (100% ширини)."""
+    """Будує інтерактивну клавіатуру: якщо серія одна — перехід до неї, якщо кілька — папка тайтлу."""
     keyboard_rows = []
 
     idx = 1
     for title, files in grouped_anime.items():
-        clean_title = format_anime_display_name(title, max_len=44)
+        clean_title = format_anime_display_name(title, max_len=40)
         has_active = any(is_file_currently_playing(register_file(f)) for f in files)
         icon = "👀" if has_active else ("📁" if len(files) > 1 else "🎬")
 
         if len(files) > 1:
             t_key = register_title_folder(files[0].parent)
-            t_size = format_compact_size(sum(f.stat().st_size for f in files))
             keyboard_rows.append([
                 InlineKeyboardButton(
-                    text=f"{icon} {idx}. {clean_title} ({len(files)} серії • {t_size})",
+                    text=f"{icon} {idx}. {clean_title} (скачано {len(files)} серій)",
                     callback_data=f"title:{t_key}"
                 )
             ])
         else:
             file_key = register_file(files[0])
+            ep = extract_episode_number_from_filename(files[0].name) or extract_episode_number_from_filename(title)
+            ep_str = f" (Еп. {ep})" if ep else ""
             keyboard_rows.append([
                 InlineKeyboardButton(
-                    text=f"{icon} {idx}. {clean_title}",
+                    text=f"{icon} {idx}. {clean_title}{ep_str}",
                     callback_data=f"item:{file_key}"
                 )
             ])
@@ -2278,8 +2315,9 @@ async def cb_del_title_confirm(callback: CallbackQuery):
 @dp.callback_query(F.data == "del_all_ask")
 async def cb_del_all_ask(callback: CallbackQuery):
     """Запитує підтвердження на повне очищення папки."""
-    video_files = get_all_downloaded_videos()
-    total_size = sum(f.stat().st_size for f in video_files)
+    grouped = get_grouped_anime()
+    total_files = sum(len(files) for files in grouped.values())
+    total_size = sum(sum(f.stat().st_size for f in files) for files in grouped.values())
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -2290,7 +2328,7 @@ async def cb_del_all_ask(callback: CallbackQuery):
         ]
     )
     await callback.message.edit_text(
-        f"⚠️ <b>Ви впевнені, що хочете видалити ВСІ {len(video_files)} серій?</b>\n"
+        f"⚠️ <b>Ви впевнені, що хочете видалити ВСІ {total_files} серій?</b>\n"
         f"📦 Це звільнить <code>{format_bytes(total_size)}</code> на диску Mac.",
         reply_markup=kb,
     )
@@ -2300,9 +2338,12 @@ async def cb_del_all_ask(callback: CallbackQuery):
 @dp.callback_query(F.data == "del_all_confirm")
 async def cb_del_all_confirm(callback: CallbackQuery):
     """Видаляє всі файли та папки в (Завантажене аніме)."""
-    video_files = get_all_downloaded_videos()
-    deleted_count = len(video_files)
-    freed_bytes = sum(f.stat().st_size for f in video_files)
+    grouped = get_grouped_anime()
+    deleted_count = sum(len(files) for files in grouped.values())
+    freed_bytes = sum(sum(f.stat().st_size for f in files) for files in grouped.values())
+
+    # Ставимо команду на очищення Mac-агенту
+    queue_mac_command("clean_all")
 
     if DOWNLOADS_DIR.exists():
         for item in list(DOWNLOADS_DIR.iterdir()):
@@ -2315,7 +2356,8 @@ async def cb_del_all_confirm(callback: CallbackQuery):
                 logger.error(f"Помилка видалення {item}: {e}")
 
     FILE_REGISTRY.clear()
-    free_gb = get_free_disk_space_gb()
+    mac_state = get_mac_device_state()
+    free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
 
     await callback.message.edit_text(
         f"💥 <b>Усі серії та папки успішно видалено з ноута!</b>\n\n"
@@ -2507,11 +2549,11 @@ async def cb_item_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="▶️ Запустити в IINA", callback_data=f"play:{file_key}"),
-                InlineKeyboardButton(text="📂 У Finder", callback_data=f"reveal:{file_key}"),
+                InlineKeyboardButton(text="▶️ Запустити в плеєрі", callback_data=f"play:{file_key}"),
+                InlineKeyboardButton(text="📂 Відкрити у Finder", callback_data=f"reveal:{file_key}"),
             ],
             [
-                InlineKeyboardButton(text=f"🗑 Видалити з ноута ({size_str})", callback_data=f"del:{file_key}")
+                InlineKeyboardButton(text=f"🗑 Видалити ({size_str})", callback_data=f"del:{file_key}")
             ],
             [
                 back_btn
@@ -2532,18 +2574,24 @@ async def cb_item_menu(callback: CallbackQuery):
         tracks_list.append("Субтитри")
     tracks_label = " + ".join(tracks_list) if tracks_list else "Оригінал"
 
-    details_block = (
-        f"🎞 <b>Якість:</b> <code>{quality_str}</code>\n"
-        f"🔊 <b>Доріжки:</b> <i>{tracks_label}</i>\n"
-        f"📦 <b>Розмір:</b> <code>{size_str}</code>\n"
-        f"🏷 <b>Finder:</b> 🟢 <i>{TAG_NAME}</i>"
-    )
+    # Формування точного опису замовлення за ТЗ користувача:
+    # 🎬 Назва тайтлу [Серія 17]
+    # 🎞 Якість: 4K Ultra HD (або 1080p Full HD)
+    #
+    # 🔊 Доріжки: Озвучення (DUB) або Субтитри (SUB)
+    # 🏷 Finder: 🟢 На черзі глянути
+    #
+    # 📦 Розмір: 1.28 ГБ
+    tracks_label = " + ".join(tracks_list) if tracks_list else "Озвучення (DUB)"
+    if not quality_str:
+        quality_str = "1080p Full HD"
 
     text = (
-        f"🎬 <b>{clean_title}</b>{ep_badge}\n\n"
-        f"{status_badge}"
-        f"{details_block}\n\n"
-        f"📂 <b>Шлях:</b> <code>~/{file_path.parent.name}/{file_path.name}</code>"
+        f"🎬 <b>{clean_title}</b>{ep_badge}\n"
+        f"🎞 <b>Якість:</b> <code>{quality_str}</code>\n\n"
+        f"🔊 <b>Доріжки:</b> <i>{tracks_label}</i>\n"
+        f"🏷 <b>Finder:</b> 🟢 {TAG_NAME}\n\n"
+        f"📦 <b>Розмір:</b> <code>{size_str}</code>"
     )
 
     thumb = get_video_thumbnail(file_path)
@@ -2650,13 +2698,18 @@ async def cb_delete_confirm(callback: CallbackQuery):
     try:
         file_size = file_path.stat().st_size
         size_str = format_bytes(file_size)
-        parent_dir = file_path.parent
+        p_str = str(file_path.resolve() if hasattr(file_path, "resolve") else file_path)
 
-        delete_video_file_and_associated(file_path)
+        # Якщо ми на сервері — ставимо команду на видалення Mac-агенту
+        if not Path(p_str).exists():
+            queue_mac_command("delete_file", p_str)
+        else:
+            delete_video_file_and_associated(file_path)
+            clean_orphan_anime_folders()
+
         FILE_REGISTRY.pop(file_key, None)
-        clean_orphan_anime_folders()
-
-        free_gb = get_free_disk_space_gb()
+        mac_state = get_mac_device_state()
+        free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
 
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
