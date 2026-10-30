@@ -27,10 +27,20 @@ import aiohttp
 
 # Завантажуємо конфігурацію проєкту
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import BOT_TOKEN, DOWNLOADS_DIR, TAG_NAME, TAG_COLOR
+from config import BASE_DIR, BOT_TOKEN, DOWNLOADS_DIR, TAG_NAME, TAG_COLOR, TELEGRAM_API_ID, TELEGRAM_API_HASH
 from fex import FexDownloader
+from telegram_mtproto import TelegramMtprotoDownloader
 from tagger import set_macos_tag
 from progress import format_bytes
+
+mtproto_downloader: Optional[TelegramMtprotoDownloader] = None
+if TELEGRAM_API_ID and TELEGRAM_API_HASH and BOT_TOKEN:
+    mtproto_downloader = TelegramMtprotoDownloader(
+        api_id=TELEGRAM_API_ID,
+        api_hash=TELEGRAM_API_HASH,
+        bot_token=BOT_TOKEN,
+        session_dir=BASE_DIR,
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -281,6 +291,145 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                     ]
                 }
 
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        if poster_path.exists():
+                            data_form = aiohttp.FormData()
+                            data_form.add_field("chat_id", str(chat_id))
+                            data_form.add_field("caption", card_text)
+                            data_form.add_field("parse_mode", "HTML")
+                            data_form.add_field("reply_markup", json.dumps(keyboard))
+                            data_form.add_field("photo", open(poster_path, "rb"), filename="poster.jpg")
+                            await s.post(f"https://api.telegram.org/bot{bot_token}/sendPhoto", data=data_form)
+                            if msg_id:
+                                try:
+                                    await s.post(f"https://api.telegram.org/bot{bot_token}/deleteMessage", json={
+                                        "chat_id": chat_id,
+                                        "message_id": msg_id
+                                    })
+                                except Exception:
+                                    pass
+                        else:
+                            if msg_id:
+                                await s.post(f"https://api.telegram.org/bot{bot_token}/editMessageText", json={
+                                    "chat_id": chat_id,
+                                    "message_id": msg_id,
+                                    "text": card_text,
+                                    "parse_mode": "HTML",
+                                    "reply_markup": keyboard
+                                })
+                            else:
+                                await s.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={
+                                    "chat_id": chat_id,
+                                    "text": card_text,
+                                    "parse_mode": "HTML",
+                                    "reply_markup": keyboard
+                                })
+                except Exception as e_tg:
+                    logger.warning(f"Не вдалося оновити повідомлення в Telegram: {e_tg}")
+
+            return True
+
+        elif action == "download_tg_media":
+            data = json.loads(payload)
+            chat_id = data.get("chat_id")
+            source_msg_id = data.get("source_msg_id")
+            msg_id = data.get("msg_id")
+            title = data.get("title", "Аніме")
+            folder_name = data.get("folder") or title
+            f_name = data.get("filename") or f"episode_{data.get('episode', 1)}.mp4"
+            quality = data.get("quality", "1080p Full HD")
+            dub_sub = data.get("dub_sub", "Субтитри (SUB)")
+            ep_num = data.get("episode", 1)
+
+            target_folder = DOWNLOADS_DIR / folder_name
+            target_folder.mkdir(parents=True, exist_ok=True)
+            dest_file = target_folder / f_name
+            poster_path = target_folder / "poster.jpg"
+            bot_token = os.environ.get("BOT_TOKEN") or BOT_TOKEN
+
+            if not mtproto_downloader:
+                logger.error("MTProto не налаштований на MacAgent!")
+                return True
+
+            if dest_file.exists() and dest_file.stat().st_size > 5 * 1024 * 1024:
+                logger.info(f"Файл {dest_file.name} вже існує на Mac. Відправляю картку.")
+            else:
+                logger.info(f"Початок MTProto завантаження з Telegram на Mac SSD: {f_name}")
+                last_tg_update = 0.0
+
+                async def on_tg_mac_progress(downloaded: int, total: int):
+                    nonlocal last_tg_update
+                    now = time.time()
+                    if (now - last_tg_update) > 2.2 and bot_token and chat_id and msg_id:
+                        last_tg_update = now
+                        pct = (downloaded / total * 100) if total else 0
+                        bar_blocks = int(pct / 10)
+                        bar = "▰" * bar_blocks + "▱" * (10 - bar_blocks)
+                        d_mb = downloaded / (1024 * 1024)
+                        t_mb = total / (1024 * 1024)
+                        text = (
+                            f"🚀 <b>Завантаження відео з Telegram (MTProto)</b>\n\n"
+                            f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
+                            f"📄 <b>Файл:</b> <code>{f_name}</code>\n"
+                            f"📂 <b>Папка:</b> <code>{folder_name}</code>\n\n"
+                            f"[{bar}] {pct:.1f}%\n"
+                            f"📦 {d_mb:.1f} МБ / {t_mb:.1f} МБ • ⚡️ Швидкісне збереження на SSD"
+                        )
+                        try:
+                            async with aiohttp.ClientSession() as s:
+                                url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+                                await s.post(url, json={
+                                    "chat_id": chat_id,
+                                    "message_id": msg_id,
+                                    "text": text,
+                                    "parse_mode": "HTML"
+                                }, timeout=aiohttp.ClientTimeout(total=2))
+                        except Exception:
+                            pass
+
+                await mtproto_downloader.download_message_video(
+                    chat_id=chat_id,
+                    message_id=source_msg_id,
+                    destination_path=dest_file,
+                    progress_callback=on_tg_mac_progress,
+                )
+                set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
+                set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+
+            if not poster_path.exists():
+                try:
+                    subprocess.run([
+                        "/opt/homebrew/bin/ffmpeg", "-y", "-ss", "00:03:00",
+                        "-i", str(dest_file), "-vframes", "1", "-q:v", "2", str(poster_path)
+                    ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+
+            if bot_token and chat_id and dest_file.exists():
+                size_str = format_bytes(dest_file.stat().st_size)
+                f_key = hashlib.md5(str(dest_file).encode("utf-8")).hexdigest()[:10]
+                card_text = (
+                    f"🎬 <b>{title} [Серія {ep_num}]</b>\n"
+                    f"🎞 <b>Якість:</b> {quality}\n\n"
+                    f"🔊 <b>Доріжки:</b> {dub_sub}\n"
+                    f"🏷 <b>Finder:</b> 🟢 На черзі глянути\n\n"
+                    f"📦 <b>Розмір:</b> {size_str}"
+                )
+                keyboard = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "▶️ Запустити в плеєрі", "callback_data": f"play:{f_key}"},
+                            {"text": "📁 Відкрити у Finder", "callback_data": f"finder:{f_key}"}
+                        ],
+                        [
+                            {"text": f"🗑 Видалити ({size_str})", "callback_data": f"del:{f_key}"}
+                        ],
+                        [
+                            {"text": "⬅️ Назад до списку", "callback_data": "refresh_list"}
+                        ]
+                    ]
+                }
                 try:
                     async with aiohttp.ClientSession() as s:
                         if poster_path.exists():

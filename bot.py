@@ -725,9 +725,13 @@ def extract_links_and_title(message: Message) -> Tuple[List[Tuple[str, str]], st
     lines = [line.strip() for line in text.split("\n") if line.strip()]
     if lines:
         first_line = lines[0]
-        first_line = re.sub(r"^[^\w\s]+", "", first_line).strip()
+        # Прибираємо технічні префікси типу [РГ], [РГ SUB], емодзі на початку, а також технічні теги [04 з XX], [WEBRip...]
+        first_line = re.sub(r"^(?:\[[^\]]*\]|[^\w\s])+\s*", "", first_line).strip()
         title_parts = first_line.split("/")
-        title = title_parts[0].strip() if title_parts else first_line
+        raw_t = title_parts[0].strip() if title_parts else first_line
+        clean_t = re.sub(r"\[.*?\]|\(\d+\s*сезон\)", "", raw_t, flags=re.IGNORECASE).strip()
+        clean_t = re.sub(r"\s+", " ", clean_t).strip()
+        title = clean_t if clean_t else raw_t
 
     return links, title
 
@@ -3110,11 +3114,66 @@ async def handle_media_file(message: Message, bot: Bot):
         if clean_stem:
             caption_title = clean_stem
 
+    raw_caption = (message.caption or message.text or "").strip()
+    first_caption_line = raw_caption.splitlines()[0].strip() if raw_caption else ""
+
+    # Визначаємо номер серії, якість та доріжки з підпису або імені файлу
+    meta_src = f"{first_caption_line} {filename}"
+    ep_m = re.search(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]|(\d{1,3})\s*сері", meta_src, re.IGNORECASE)
+    ep_num = int(ep_m.group(1) or ep_m.group(2)) if ep_m else 1
+
+    meta_low = meta_src.lower()
+    quality_str = "4K Ultra HD" if ("2160p" in meta_low or "4k" in meta_low) else ("1080p Full HD" if "1080p" in meta_low else "1080p Full HD")
+    has_mvo = any(w in meta_low for w in ("mvo", "озвуч", "dub"))
+    has_sub = any(w in meta_low for w in ("sub", "саб", "субтитр"))
+    if has_mvo and has_sub:
+        tracks_str = "Озвучення + Субтитри"
+    elif has_sub:
+        tracks_str = "Субтитри (SUB)"
+    elif has_mvo:
+        tracks_str = "Озвучення (DUB)"
+    else:
+        tracks_str = "Озвучення + Субтитри"
+
+    # Якщо Telegram не передав оригінальне ім'я файлу (наприклад episode.mp4), формуємо інформативну назву з підпису
+    if filename in ("episode.mp4", "video.mkv") and first_caption_line:
+        ext = Path(filename).suffix or ".mp4"
+        safe_line = re.sub(r"[^\w\s\-\.\,\(\)\[\]]", "", first_caption_line, flags=re.UNICODE).strip()[:110]
+        if safe_line:
+            filename = f"{safe_line}{ext}"
+
     clean_title = sanitize_folder_name(caption_title) if caption_title else "Telegram_Anime"
     target_folder = DOWNLOADS_DIR / clean_title
     target_folder.mkdir(parents=True, exist_ok=True)
 
     dest_path = target_folder / filename
+
+    # Якщо бот працює на сервері Linux (Railway) — передаємо завантаження важкого Telegram-файлу напряму на Mac через MTProto!
+    if platform.system() != "Darwin":
+        status_msg = await message.reply(
+            f"⏳ <b>Завдання передано на Mac (MTProto)!</b>\n\n"
+            f"🎬 <b>{clean_title}</b> [Серія {ep_num}]\n"
+            f"📄 <code>{filename}</code> ({file_size_mb:.1f} МБ)\n"
+            f"📂 Папка: <code>{target_folder.name}</code>\n\n"
+            f"🍏 <b>Mac розпочинає пряме завантаження з Telegram на SSD без ліміту 20 МБ...</b>"
+        )
+        cmd_payload = json.dumps({
+            "chat_id": message.chat.id,
+            "source_msg_id": message.message_id,
+            "msg_id": status_msg.message_id,
+            "title": clean_title,
+            "folder": target_folder.name,
+            "filename": filename,
+            "episode": ep_num,
+            "quality": quality_str,
+            "dub_sub": tracks_str,
+        })
+        queue_mac_command("download_tg_media", cmd_payload)
+        try:
+            await ask_source_for_media(bot, message.chat.id, caption_title or clean_title)
+        except Exception as e_ask:
+            logger.debug(f"ask_source_for_media: {e_ask}")
+        return
 
     # Зберігаємо оригінальне прев'ю з повідомлення Telegram (thumb)
     if thumb_file_id:
