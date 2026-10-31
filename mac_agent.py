@@ -11,6 +11,7 @@ Mac Local Downloader & Library Agent
 import asyncio
 import base64
 import hashlib
+import html
 import json
 import logging
 import os
@@ -414,7 +415,7 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                         bot_token,
                         chat_id,
                         msg_id,
-                        f"❌ <b>Помилка завантаження на Mac:</b>\n<code>{e_dl}</code>",
+                        f"❌ <b>Помилка завантаження на Mac:</b>\n<code>{html.escape(str(e_dl))}</code>",
                     )
                     return True
 
@@ -536,7 +537,7 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                         bot_token,
                         chat_id,
                         msg_id,
-                        f"❌ <b>Помилка завантаження з Telegram на Mac:</b>\n<code>{e_tg_dl}</code>",
+                        f"❌ <b>Помилка завантаження з Telegram на Mac:</b>\n<code>{html.escape(str(e_tg_dl))}</code>",
                     )
                     return True
 

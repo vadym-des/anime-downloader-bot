@@ -16,7 +16,7 @@ logger = logging.getLogger("SeedData")
 # title, pref_type, fex_url, thread_url
 SEED_TITLES: List[Dict[str, Optional[str]]] = [
     {"title": "Вигнаний важкоозброєний лицар стає непереможним завдяки знанням гри", "pref": "dub",
-     "fex": "https://fex.net/s/mleyd4o", "thread": "https://t.me/mediareser/364"},
+     "fex": "https://fex.net/uk/s/mleyd4o/6005554951", "thread": None},
     {"title": "Маг, що повернувся, — особливий", "pref": "dub",
      "fex": "https://fex.net/s/rntczlx", "thread": None},
     {"title": "Я переродився гобліном, питання є?", "pref": "dub",
@@ -35,7 +35,7 @@ SEED_TITLES: List[Dict[str, Optional[str]]] = [
     {"title": "Військові хроніки Ромелії", "pref": "dub",
      "fex": "https://fex.net/s/5a8oskn", "thread": None},
     {"title": "Весілля світлячка", "pref": "dub",
-     "fex": "https://fex.net/s/mynzyl5", "thread": "https://t.me/mediareser/11897"},
+     "fex": "https://fex.net/s/mynzyl5", "thread": None},
 ]
 
 
@@ -46,13 +46,18 @@ def seed_subscriptions(chat_id: int) -> int:
     for item in SEED_TITLES:
         existing = get_subscription_by_title(chat_id, item["title"])
         if existing:
-            # Оновлюємо джерела та виправляємо pref_type згідно з правильним конфігом
-            add_subscription(chat_id, existing["title"], channel="ridnyiholos", pref_type=item["pref"] or "dub")
+            # Не перезаписуємо вибір користувача (pref_type), якщо він уже змінив його вручну в боті,
+            # окрім випадку Ао Аші (яке суто SUB)
+            cur_pref = "sub" if item["pref"] == "sub" else (existing.get("pref_type") or item["pref"] or "dub")
+            add_subscription(chat_id, existing["title"], channel="ridnyiholos", pref_type=cur_pref)
             set_subscription_sources(chat_id, existing["title"], fex_url=item["fex"], thread_url=item["thread"])
-            # Якщо для тайтлу thread має бути None (наприклад, прибрано помилковий лінк з Дикого боса)
-            if item["thread"] is None and existing.get("thread_url") == "https://t.me/c/mediareser/12051":
+            if item["thread"] is None and existing.get("thread_url"):
                 with sqlite3.connect(DB_PATH) as conn:
                     conn.execute("UPDATE anime_subscriptions SET thread_url = NULL WHERE id = ?", (existing["id"],))
+                    conn.commit()
+            if item["fex"] is None and existing.get("fex_url"):
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute("UPDATE anime_subscriptions SET fex_url = NULL WHERE id = ?", (existing["id"],))
                     conn.commit()
             continue
         add_subscription(chat_id, item["title"], channel="ridnyiholos", pref_type=item["pref"] or "dub")

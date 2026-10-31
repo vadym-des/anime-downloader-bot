@@ -17,8 +17,8 @@ class FexDownloader:
 
     @staticmethod
     def extract_share_key(url: str) -> Optional[str]:
-        """Витягує ключ поширення з посилань FEX.NET (наприклад, y0xlvde)."""
-        match = re.search(r"fex\.net/(?:[a-z]{2}/)?s/([a-zA-Z0-9]+)", url)
+        """Витягує ключ поширення з посилань FEX.NET разом із ID підпапки, якщо він є (наприклад, mleyd4o/6005554951)."""
+        match = re.search(r"fex\.net/(?:[a-z]{2}/)?s/([a-zA-Z0-9]+(?:/\d+)?)", url or "")
         if match:
             return match.group(1)
         return None
@@ -69,7 +69,8 @@ class FexDownloader:
 
             files: List[Dict] = []
             tree = data.get("tree") or {}
-            await cls._crawl_tree(session, headers, share_key, tree, files, token)
+            base_share_key = share_key.split("/")[0]
+            await cls._crawl_tree(session, headers, base_share_key, tree, files, token)
             return files
 
     @classmethod
@@ -120,47 +121,93 @@ class FexDownloader:
         progress_callback: Optional[Callable[[int, int], None]] = None
     ) -> Path:
         """
-        Атомарно завантажує файл:
+        Атомарно завантажує файл із підтримкою докачування (HTTP Range) та авто-повторів при обриві мережі:
         1. Качає у тимчасовий файл destination_path.part.
-        2. Лише після 100% завантаження перейменовує у цільовий файл.
-        3. Якщо сталася помилка — битий файл .part видаляється.
+        2. Якщо з'єднання обірвалося (ConnectionResetError / ContentLengthError) — автоматично докачує з місця зупинки (до 6 спроб).
+        3. Лише після 100% завантаження перейменовує у цільовий файл.
         """
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         part_path = destination_path.with_name(f"{destination_path.name}.part")
 
-        headers = {"User-Agent": USER_AGENT}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        timeout = aiohttp.ClientTimeout(connect=15, sock_read=60, total=3600)
-        connector = aiohttp.TCPConnector(limit=5, enable_cleanup_closed=True)
+        max_retries = 6
+        total_size = 0
+        last_error: Optional[Exception] = None
 
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                async with session.get(download_url, headers=headers) as resp:
-                    content_type = resp.headers.get("Content-Type", "").lower()
-                    if "text/html" in content_type:
-                        raise RuntimeError("FEX повернув веб-сторінку замість відеофайлу (відхилено токен доступу).")
+            for attempt in range(1, max_retries + 1):
+                downloaded = part_path.stat().st_size if part_path.exists() else 0
+                if total_size > 0 and downloaded >= total_size:
+                    break
 
-                    if resp.status != 200:
-                        raise RuntimeError(f"Помилка завантаження файлу з FEX (HTTP {resp.status})")
+                headers = {"User-Agent": USER_AGENT}
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                if downloaded > 0:
+                    headers["Range"] = f"bytes={downloaded}-"
 
-                    total_size = int(resp.headers.get("Content-Length", 0))
-                    downloaded = 0
+                timeout = aiohttp.ClientTimeout(connect=20, sock_read=90, total=7200)
+                connector = aiohttp.TCPConnector(limit=5, enable_cleanup_closed=True)
 
-                    with open(part_path, "wb", buffering=2 * CHUNK_SIZE) as f:
-                        async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                            if not chunk:
+                try:
+                    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                        # Якщо це повторна спроба і токен міг застаріти — оновимо токен
+                        if attempt > 1:
+                            new_tok = await cls.get_anonymous_token(session)
+                            if new_tok:
+                                token = new_tok
+                                headers["Authorization"] = f"Bearer {token}"
+
+                        async with session.get(download_url, headers=headers) as resp:
+                            content_type = resp.headers.get("Content-Type", "").lower()
+                            if "text/html" in content_type:
+                                raise RuntimeError("FEX повернув веб-сторінку замість відеофайлу (відхилено токен доступу).")
+
+                            if resp.status == 206:
+                                content_len = int(resp.headers.get("Content-Length", 0))
+                                if total_size == 0 and content_len > 0:
+                                    total_size = downloaded + content_len
+                                file_mode = "ab"
+                            elif resp.status == 200:
+                                # Сервер не підтримав Range — качаємо з нуля
+                                downloaded = 0
+                                total_size = int(resp.headers.get("Content-Length", 0))
+                                file_mode = "wb"
+                            elif resp.status == 416 and total_size > 0 and downloaded >= total_size:
+                                # Файл уже повністю завантажений
                                 break
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if progress_callback and total_size > 0:
-                                try:
-                                    res = progress_callback(downloaded, total_size)
-                                    if asyncio.iscoroutine(res):
-                                        await res
-                                except Exception:
-                                    pass
+                            else:
+                                raise RuntimeError(f"Помилка завантаження файлу з FEX (HTTP {resp.status})")
+
+                            with open(part_path, file_mode, buffering=2 * CHUNK_SIZE) as f:
+                                async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if progress_callback and total_size > 0:
+                                        try:
+                                            res = progress_callback(downloaded, total_size)
+                                            if asyncio.iscoroutine(res):
+                                                await res
+                                        except Exception:
+                                            pass
+
+                    # Перевіряємо, чи завантажили всі байти
+                    actual_size = part_path.stat().st_size if part_path.exists() else 0
+                    if total_size == 0 or actual_size >= total_size:
+                        break
+                    else:
+                        raise RuntimeError(f"Неповне завантаження ({actual_size} / {total_size} байт), докачую...")
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e_attempt:
+                    last_error = e_attempt
+                    logger.warning(f"FEX обрив на спробі {attempt}/{max_retries} ({destination_path.name}): {e_attempt}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(min(3 * attempt, 12))
+                    else:
+                        raise last_error
 
             # Успішно завантажено — атомарно замінюємо на фінальний файл
             if part_path.exists():
@@ -168,8 +215,14 @@ class FexDownloader:
 
             return destination_path
 
-        except (Exception, asyncio.CancelledError) as e:
-            # Видаляємо пошкоджений або скасований файл
+        except asyncio.CancelledError as e:
+            if part_path.exists():
+                try:
+                    part_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            raise e
+        except Exception as e:
             if part_path.exists():
                 try:
                     part_path.unlink(missing_ok=True)

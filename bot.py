@@ -998,9 +998,9 @@ def build_track_main_menu(chat_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             if pref == "sub" or "ао аші" in s["title"].lower() or detect_pref_from_text(s["title"]) == "sub":
                 pref_label = "📝 Тільки субтитри [SUB]"
             elif pref == "dub":
-                pref_label = "🎙 Озвучення [DUB]"
+                pref_label = "🎙 Тільки озвучення [DUB]"
             else:
-                pref_label = "⚡️ Будь-що"
+                pref_label = "🎙+📝 Озвучення + Субтитри"
             text += f"<b>{idx}.</b> 🎬 {s['title']}\n      └ <i>{pref_label} • {src}</i>\n\n"
             t_key = register_track_title(s["title"])
             kb_rows.append([
@@ -1018,24 +1018,33 @@ def build_track_main_menu(chat_id: int) -> Tuple[str, InlineKeyboardMarkup]:
 
 
 async def build_anime_card(chat_id: int, title: str) -> Tuple[str, InlineKeyboardMarkup]:
-    """Будує інтерактивну картку аніме з гарним форматуванням, усіма серіями та чіткими статусами."""
+    """Будує інтерактивну картку аніме з чітким розділенням FEX.NET vs Медіатека та вибраних доріжок (DUB / SUB / ОБИДВА)."""
     clean_title = title.strip()
     sub = get_subscription_by_title(chat_id, clean_title)
-    current_pref = sub["pref_type"] if sub else None
+    current_pref = sub["pref_type"] if sub else "dub"
     t_key = register_track_title(clean_title)
 
     # Перевіримо наявність серій у сезонному каталозі
     catalog = await fetch_ongoings_catalog("ridnyiholos")
     cat_item = None
-    norm_search = re.sub(r"\[.*?\]|\(.*?\)", "", clean_title).strip().lower()
+    norm_search = normalize_title_for_match(clean_title)
     for c_title, c_data in catalog.items():
-        if norm_search and (norm_search in c_title.lower() or c_title.lower() in norm_search):
+        norm_c = normalize_title_for_match(c_title)
+        if norm_search and norm_c and (norm_search in norm_c or norm_c in norm_search):
             cat_item = c_data
             break
 
-    has_episodes = False
-    has_fex = bool(sub and sub.get("fex_url"))
-    media_url = normalize_telegram_url(sub.get("thread_url")) if sub else None
+    # Визначаємо джерело підписки: суто Медіатека чи FEX.NET (без змішування!)
+    sub_has_fex = bool(sub and sub.get("fex_url"))
+    sub_has_thread_only = bool(sub and sub.get("thread_url") and not sub.get("fex_url"))
+
+    has_fex = sub_has_fex or (not sub_has_thread_only and bool(cat_item and cat_item.get("has_fex")))
+    media_url = None
+    if not has_fex:
+        media_url = normalize_telegram_url(
+            (sub.get("thread_url") if sub else None) or (cat_item.get("media_url") if cat_item else None)
+        )
+
     ep_count_text = ""
     tracks_str = ""
 
@@ -1043,63 +1052,62 @@ async def build_anime_card(chat_id: int, title: str) -> Tuple[str, InlineKeyboar
     eps_sub = []
     eps_fex = set()
 
-    # Якщо у підписці є пряме посилання на FEX, а в каталозі воно ще не підтягнуте
     fex_sk = None
     if sub and sub.get("fex_url"):
         fex_sk = FexDownloader.extract_share_key(sub["fex_url"])
-    if not fex_sk and cat_item and cat_item.get("fex_share_key"):
+    elif has_fex and cat_item and cat_item.get("fex_share_key"):
         fex_sk = cat_item["fex_share_key"]
 
-    if cat_item:
-        if fex_sk and not cat_item.get("enriched_fex"):
-            try:
-                files = await asyncio.wait_for(FexDownloader.get_files_in_share(fex_sk), timeout=4.0)
-                found_fex_eps = set()
-                found_fex_dub = set()
-                found_fex_sub = set()
-                tracks = set()
-                for f in files:
-                    fname = f.get("name", "")
-                    m = re.search(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]", fname)
-                    if m:
-                        ep_val = int(m.group(1))
-                        found_fex_eps.add(ep_val)
-                        has_mvo = any(w in fname for w in ["MVO", "Озвуч", "DUB", "dub"])
-                        has_sub = any(w in fname for w in ["SUB", "Саб", "sub"])
-                        if "Dual" in fname or (has_mvo and has_sub) or ("[UKR MVO" in fname and "UKR SUB" in fname):
-                            found_fex_dub.add(ep_val)
-                            found_fex_sub.add(ep_val)
-                            tracks.add("Озвучення")
-                            tracks.add("Субтитри")
-                        elif has_mvo:
-                            found_fex_dub.add(ep_val)
-                            tracks.add("Озвучення")
-                        elif has_sub:
-                            found_fex_sub.add(ep_val)
-                            tracks.add("Субтитри")
-                        else:
-                            found_fex_dub.add(ep_val)
-                            found_fex_sub.add(ep_val)
+    if cat_item is None:
+        cat_item = {"title": clean_title, "posts": [], "episodes": [], "episodes_dub": [], "episodes_sub": []}
 
-                if found_fex_eps:
-                    cat_item["has_fex"] = True
-                    cat_item["fex_share_key"] = fex_sk
-                    cat_item["fex_episodes"] = sorted(list(found_fex_eps))
-                    cat_item["episodes_dub"] = sorted(list(set(cat_item.get("episodes_dub", [])) | found_fex_dub))
-                    cat_item["episodes_sub"] = sorted(list(set(cat_item.get("episodes_sub", [])) | found_fex_sub))
-                    cat_item["episodes"] = sorted(list(set(cat_item.get("episodes", [])) | found_fex_eps))
-                if tracks:
-                    cat_item["tracks"] = sorted(list(tracks))
-                cat_item["enriched_fex"] = True
-            except Exception as ex_en:
-                logger.debug(f"Помилка збагачення FEX картки: {ex_en}")
+    if has_fex and fex_sk and not cat_item.get("enriched_fex"):
+        try:
+            files = await asyncio.wait_for(FexDownloader.get_files_in_share(fex_sk), timeout=5.0)
+            found_fex_eps = set()
+            found_fex_dub = set()
+            found_fex_sub = set()
+            tracks = set()
+            for f in files:
+                fname = f.get("name", "")
+                m = re.search(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]", fname)
+                if m:
+                    ep_val = int(m.group(1))
+                    found_fex_eps.add(ep_val)
+                    has_mvo = any(w in fname for w in ["MVO", "Озвуч", "DUB", "dub"])
+                    has_sub = any(w in fname for w in ["SUB", "Саб", "sub"])
+                    if "Dual" in fname or (has_mvo and has_sub) or ("[UKR MVO" in fname and "UKR SUB" in fname):
+                        found_fex_dub.add(ep_val)
+                        found_fex_sub.add(ep_val)
+                        tracks.add("Озвучення")
+                        tracks.add("Субтитри")
+                    elif has_mvo:
+                        found_fex_dub.add(ep_val)
+                        tracks.add("Озвучення")
+                    elif has_sub:
+                        found_fex_sub.add(ep_val)
+                        tracks.add("Субтитри")
+                    else:
+                        found_fex_dub.add(ep_val)
+                        found_fex_sub.add(ep_val)
 
-        has_fex = has_fex or cat_item.get("has_fex", False)
-        media_url = media_url or cat_item.get("media_url")
-        episodes_list = cat_item.get("episodes", [])
-        eps_dub = cat_item.get("episodes_dub", [])
-        eps_sub = cat_item.get("episodes_sub", [])
-        eps_fex = set(cat_item.get("fex_episodes", []))
+            if found_fex_eps:
+                cat_item["has_fex"] = True
+                cat_item["fex_share_key"] = fex_sk
+                cat_item["fex_episodes"] = sorted(list(found_fex_eps))
+                cat_item["episodes_dub"] = sorted(list(set(cat_item.get("episodes_dub", [])) | found_fex_dub))
+                cat_item["episodes_sub"] = sorted(list(set(cat_item.get("episodes_sub", [])) | found_fex_sub))
+                cat_item["episodes"] = sorted(list(set(cat_item.get("episodes", [])) | found_fex_eps))
+            if tracks:
+                cat_item["tracks"] = sorted(list(tracks))
+            cat_item["enriched_fex"] = True
+        except Exception as ex_en:
+            logger.debug(f"Помилка збагачення FEX картки: {ex_en}")
+
+    episodes_list = cat_item.get("episodes", [])
+    eps_dub = cat_item.get("episodes_dub", [])
+    eps_sub = cat_item.get("episodes_sub", [])
+    eps_fex = set(cat_item.get("fex_episodes", []))
 
     # Визначаємо, чи це аніме виходить ТІЛЬКИ із субтитрами (без озвучення взагалі)
     explicit_pref = detect_pref_from_text((sub["title"] if sub else "") + " " + clean_title)
@@ -1113,55 +1121,63 @@ async def build_anime_card(chat_id: int, title: str) -> Tuple[str, InlineKeyboar
         if sub:
             add_subscription(chat_id, sub["title"], channel="ridnyiholos", pref_type="sub")
 
-    if cat_item:
-        ep_lines = []
-        if eps_dub and not is_sub_only:
-            dub_latest = max(eps_dub)
-            dub_src = "4K FEX" if dub_latest in eps_fex else "Онлайн"
-            ep_lines.append(f"🎙 <b>Озвучення (DUB):</b> {', '.join(f'#{e}' for e in eps_dub)} <i>(найновіша: #{dub_latest} [{dub_src}])</i>")
-        if eps_sub:
-            sub_latest = max(eps_sub)
-            sub_src = "4K FEX" if sub_latest in eps_fex else "Онлайн / Медіатека"
-            ep_lines.append(f"📝 <b>Субтитри (SUB):</b> {', '.join(f'#{e}' for e in eps_sub)} <i>(найновіша: #{sub_latest} [{sub_src}])</i>")
+    # Формуємо рядки серій та доріжок ВІДПОВІДНО до обраного режиму (Тільки озвучення / Тільки субтитри / Обидва)
+    ep_lines = []
+    if is_sub_only or current_pref == "sub":
+        tracks_str = "🔊 <b>Формат доріжок:</b> 📝 Українські субтитри (SUB)\n"
+        target_sub_eps = [e for e in eps_sub if e in eps_fex] if (has_fex and eps_fex) else (eps_sub or episodes_list)
+        if target_sub_eps:
+            sub_latest = max(target_sub_eps)
+            sub_src = "4K FEX" if has_fex else "Онлайн-медіатека"
+            ep_lines.append(f"📝 <b>Субтитри (SUB):</b> {', '.join(f'#{e}' for e in target_sub_eps)} <i>(найновіша: #{sub_latest} [{sub_src}])</i>")
+    elif current_pref == "dub":
+        tracks_str = "🔊 <b>Формат доріжок:</b> 🎙 Українське озвучення (DUB)\n"
+        target_dub_eps = [e for e in eps_dub if e in eps_fex] if (has_fex and eps_fex) else (eps_dub or episodes_list)
+        if target_dub_eps:
+            dub_latest = max(target_dub_eps)
+            dub_src = "4K FEX" if has_fex else "Онлайн-медіатека"
+            ep_lines.append(f"🎙 <b>Озвучення (DUB):</b> {', '.join(f'#{e}' for e in target_dub_eps)} <i>(найновіша: #{dub_latest} [{dub_src}])</i>")
+    else:
+        # current_pref == "any": показуємо ОБИДВА варіанти (і озвучення, і субтитри)
+        tracks_str = "🔊 <b>Формат доріжок:</b> 🎙 Озвучення + 📝 Субтитри (обидва варіанти)\n"
+        target_dub_eps = [e for e in eps_dub if e in eps_fex] if (has_fex and eps_fex) else eps_dub
+        target_sub_eps = [e for e in eps_sub if e in eps_fex] if (has_fex and eps_fex) else eps_sub
+        if target_dub_eps:
+            dub_latest = max(target_dub_eps)
+            dub_src = "4K FEX" if has_fex else "Онлайн-медіатека"
+            ep_lines.append(f"🎙 <b>Озвучення (DUB):</b> {', '.join(f'#{e}' for e in target_dub_eps)} <i>(найновіша: #{dub_latest} [{dub_src}])</i>")
+        if target_sub_eps:
+            sub_latest = max(target_sub_eps)
+            sub_src = "4K FEX" if has_fex else "Онлайн-медіатека"
+            ep_lines.append(f"📝 <b>Субтитри (SUB):</b> {', '.join(f'#{e}' for e in target_sub_eps)} <i>(найновіша: #{sub_latest} [{sub_src}])</i>")
 
-        if ep_lines:
-            has_episodes = True
-            ep_count_text = "\n".join(ep_lines) + "\n"
-        elif episodes_list:
-            has_episodes = True
-            ep_list_formatted = ", ".join(f"#{e}" for e in episodes_list)
-            ep_count_text = f"🍿 <b>Доступні серії:</b> {ep_list_formatted} <i>({len(episodes_list)} серій)</i>\n"
+    if ep_lines:
+        ep_count_text = "\n".join(ep_lines) + "\n"
 
-        tracks = cat_item.get("tracks", [])
-        if tracks:
-            tracks_str = f"🔊 <b>Доріжки у файлах:</b> {' + '.join(tracks)} (Dual Audio / Саби)\n"
-
-    # Режим завантаження / доступності
+    # Режим завантаження / доступності (без змішування FEX і Медіатеки!)
     if has_fex:
         delivery_badge = (
-            "🟢 <b>Режим релізу:</b> ⚡️ <i>Повний авто-пілот (4K / 1080p FEX.NET)</i>\n"
-            "   └ <i>(Всі серії завантажуються безпосередньо на Mac)</i>\n"
+            "🟢 <b>Джерело:</b> ⚡️ <i>FEX.NET (4K / 1080p пряме завантаження на Mac)</i>"
         )
     elif is_sub_only:
         delivery_badge = (
-            "🟡 <b>Режим релізу:</b> 📲 <i>Онлайн-медіатека Telegram (@mediareser)</i>\n"
-            "   └ 📝 <i>Виходить виключно із субтитрами [РГ SUB] (озвучення немає)</i>\n"
+            "🟡 <b>Джерело:</b> 📲 <i>Онлайн-медіатека Telegram (@mediareser)</i>\n"
+            "   └ 📝 <i>Виходить виключно із субтитрами [РГ SUB]</i>"
         )
     else:
         delivery_badge = (
-            "🟡 <b>Режим релізу:</b> 📲 <i>Онлайн-медіатека Telegram (@mediareser)</i>\n"
-            "   └ <i>(Бот сповістить про вихід та завантажить при Forward)</i>\n"
+            "🟡 <b>Джерело:</b> 📲 <i>Онлайн-медіатека Telegram (@mediareser)</i>"
         )
 
     # Статус поточної підписки
     if is_sub_only:
-        status_badge = "🔔 <b>Статус моніторингу:</b> 📝 <i>Тільки субтитри [РГ SUB]</i>"
+        status_badge = "🔔 <b>Підписка:</b> 📝 <i>Тільки субтитри [SUB]</i>"
     elif current_pref == "dub":
-        status_badge = "🔔 <b>Ваш вибір:</b> 🎙 <i>Тільки озвучення (DUB)</i>"
+        status_badge = "🔔 <b>Підписка:</b> 🎙 <i>Тільки озвучення (DUB)</i>"
     elif current_pref == "sub":
-        status_badge = "🔔 <b>Ваш вибір:</b> 📝 <i>Тільки субтитри (SUB)</i>"
+        status_badge = "🔔 <b>Підписка:</b> 📝 <i>Тільки субтитри (SUB)</i>"
     elif current_pref == "any":
-        status_badge = "🔔 <b>Ваш вибір:</b> ⚡️ <i>Будь-який перший реліз</i>"
+        status_badge = "🔔 <b>Підписка:</b> 🎙+📝 <i>Озвучення та Субтитри (обидва варіанти)</i>"
     else:
         status_badge = "⚪️ <b>Статус:</b> <i>Не підписані на сповіщення</i>"
 
@@ -1176,8 +1192,8 @@ async def build_anime_card(chat_id: int, title: str) -> Tuple[str, InlineKeyboar
     if ep_count_text.strip():
         parts.append(ep_count_text.strip())
     parts.append(status_badge)
-    if not is_sub_only or has_fex:
-        parts.append("👇 <b>Оберіть налаштування або серію для завантаження:</b>")
+    if has_fex or not is_sub_only:
+        parts.append("👇 <b>Оберіть режим підписки або серію для скачування:</b>")
 
     text = "\n\n".join(parts)
 
@@ -1186,62 +1202,95 @@ async def build_anime_card(chat_id: int, title: str) -> Tuple[str, InlineKeyboar
         kb_rows.extend([
             [
                 InlineKeyboardButton(
-                    text=f"{'🔘' if current_pref == 'dub' else '⚪️'} 🎙 Озвучення",
+                    text=f"{'🔘' if current_pref == 'dub' else '⚪️'} 🎙 Тільки озвучення",
                     callback_data=f"set_sub:{t_key}:dub"
                 ),
                 InlineKeyboardButton(
-                    text=f"{'🔘' if current_pref == 'sub' else '⚪️'} 📝 Субтитри",
+                    text=f"{'🔘' if current_pref == 'sub' else '⚪️'} 📝 Тільки субтитри",
                     callback_data=f"set_sub:{t_key}:sub"
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=f"{'🔘' if current_pref == 'any' else '⚪️'} ⚡️ Будь-який перший реліз",
+                    text=f"{'🔘' if current_pref == 'any' else '⚪️'} 🎙+📝 Озвучення + Субтитри (обидва)",
                     callback_data=f"set_sub:{t_key}:any"
                 ),
             ],
         ])
 
-    # Визначаємо серії та кнопки згідно з обраним фільтром (DUB / SUB / ANY)
-    if current_pref == "dub":
-        active_episodes = eps_dub
-        batch_type = "dub"
-        batch_label = f"📥 Завантажити всі з озвученням ({len(active_episodes)} серій у 4K)"
-    elif current_pref == "sub":
-        active_episodes = eps_sub
-        batch_type = "sub"
-        batch_label = f"📥 Завантажити всі із субтитрами ({len(active_episodes)} серій)"
-    else:
-        active_episodes = cat_item.get("episodes", []) if cat_item else []
-        batch_type = "any"
-        fex_cnt = len([e for e in active_episodes if e in eps_fex]) or len(active_episodes)
-        batch_label = f"📥 Завантажити всі доступні ({fex_cnt} серій у 4K)"
+    # Кнопки скачування серій (тільки якщо тайтл має FEX.NET роздачу!)
+    if has_fex:
+        fex_dub_eps = sorted([e for e in eps_dub if e in eps_fex] or eps_dub or list(eps_fex))
+        fex_sub_eps = sorted([e for e in eps_sub if e in eps_fex] or eps_sub or list(eps_fex))
 
-    if active_episodes and has_fex:
-        kb_rows.append([
-            InlineKeyboardButton(
-                text=batch_label,
-                callback_data=f"track_batch_ask:{t_key}:{batch_type}"
-            )
-        ])
-        ep_buttons = []
-        for ep in sorted(active_episodes):
-            is_fex = ep in eps_fex
-            if current_pref == "dub":
-                btn_txt = f"📥 Еп.{ep} 🎙" if is_fex else f"📲 Еп.{ep} 🎙"
-            elif current_pref == "sub":
-                btn_txt = f"📥 Еп.{ep} 📝" if is_fex else f"📲 Еп.{ep} 📝"
-            else:
-                if ep not in eps_dub and ep in eps_sub:
-                    btn_txt = f"📲 Еп.{ep} (SUB)"
-                else:
-                    btn_txt = f"📥 Еп.{ep}"
-            ep_buttons.append(InlineKeyboardButton(text=btn_txt, callback_data=f"track_ep_dl:{t_key}:{ep}"))
+        if current_pref == "dub":
+            if fex_dub_eps:
+                kb_rows.append([
+                    InlineKeyboardButton(
+                        text=f"📥 Завантажити всі з озвученням ({len(fex_dub_eps)} серій у 4K)",
+                        callback_data=f"track_batch_ask:{t_key}:dub"
+                    )
+                ])
+                ep_buttons = [
+                    InlineKeyboardButton(text=f"📥 Еп.{ep} 🎙", callback_data=f"track_ep_dl:{t_key}:{ep}:dub")
+                    for ep in fex_dub_eps
+                ]
+                for i in range(0, len(ep_buttons), 4):
+                    kb_rows.append(ep_buttons[i : i + 4])
 
-        for i in range(0, len(ep_buttons), 4):
-            kb_rows.append(ep_buttons[i : i + 4])
+        elif current_pref == "sub":
+            if fex_sub_eps:
+                kb_rows.append([
+                    InlineKeyboardButton(
+                        text=f"📥 Завантажити всі із субтитрами ({len(fex_sub_eps)} серій)",
+                        callback_data=f"track_batch_ask:{t_key}:sub"
+                    )
+                ])
+                ep_buttons = [
+                    InlineKeyboardButton(text=f"📥 Еп.{ep} 📝", callback_data=f"track_ep_dl:{t_key}:{ep}:sub")
+                    for ep in fex_sub_eps
+                ]
+                for i in range(0, len(ep_buttons), 4):
+                    kb_rows.append(ep_buttons[i : i + 4])
 
-    if media_url:
+        else:
+            # current_pref == "any": даємо можливість скачати І озвучення, І субтитри!
+            batch_row = []
+            if fex_dub_eps:
+                batch_row.append(
+                    InlineKeyboardButton(
+                        text=f"📥 Всі 🎙 Озвучення ({len(fex_dub_eps)})",
+                        callback_data=f"track_batch_ask:{t_key}:dub"
+                    )
+                )
+            if fex_sub_eps:
+                batch_row.append(
+                    InlineKeyboardButton(
+                        text=f"📥 Всі 📝 Субтитри ({len(fex_sub_eps)})",
+                        callback_data=f"track_batch_ask:{t_key}:sub"
+                    )
+                )
+            if batch_row:
+                kb_rows.append(batch_row)
+
+            if fex_dub_eps:
+                dub_btns = [
+                    InlineKeyboardButton(text=f"📥 Еп.{ep} 🎙", callback_data=f"track_ep_dl:{t_key}:{ep}:dub")
+                    for ep in fex_dub_eps
+                ]
+                for i in range(0, len(dub_btns), 4):
+                    kb_rows.append(dub_btns[i : i + 4])
+
+            if fex_sub_eps:
+                sub_btns = [
+                    InlineKeyboardButton(text=f"📥 Еп.{ep} 📝", callback_data=f"track_ep_dl:{t_key}:{ep}:sub")
+                    for ep in fex_sub_eps
+                ]
+                for i in range(0, len(sub_btns), 4):
+                    kb_rows.append(sub_btns[i : i + 4])
+
+    # Кнопка Медіатеки показується ТІЛЬКИ якщо це тайтл з Медіатеки (БЕЗ FEX.NET!)
+    if not has_fex and media_url:
         kb_rows.append([
             InlineKeyboardButton(text="↗️ Відкрити тему в Медіатеці", url=media_url)
         ])
@@ -1621,10 +1670,12 @@ async def cb_track_batch_go(callback: CallbackQuery, bot: Bot):
     if not cat_item:
         cat_item = {"title": title, "posts": [], "episodes": [], "episodes_dub": [], "episodes_sub": []}
 
-    # Знаходимо FEX share key
-    share_key = cat_item.get("fex_share_key")
-    if not share_key and sub and sub.get("fex_url"):
+    # Знаходимо FEX share key (пріоритет: збережене посилання підписки з ID підпапки!)
+    share_key = None
+    if sub and sub.get("fex_url"):
         share_key = FexDownloader.extract_share_key(sub["fex_url"])
+    if not share_key:
+        share_key = cat_item.get("fex_share_key")
     if not share_key:
         for p in cat_item.get("posts", []):
             for l_lbl, l_url in p.get("links", []):
@@ -1643,6 +1694,13 @@ async def cb_track_batch_go(callback: CallbackQuery, bot: Bot):
     if not files:
         await safe_answer(callback, "⚠️ Роздача FEX.NET порожня або недоступна.", show_alert=True)
         return
+
+    # Захист від загального архіву: якщо у роздачі > 25 файлів, фільтруємо за назвою тайтлу
+    if len(files) > 25:
+        norm_t = normalize_title_for_match(title)
+        title_matched = [f for f in files if norm_t and norm_t[:15] in normalize_title_for_match(f.get("name", ""))]
+        if title_matched:
+            files = title_matched
 
     f_eps = set()
     for f in files:
@@ -1810,6 +1868,7 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split(":")
     t_key = parts[1]
     ep_num = int(parts[2])
+    req_pref = parts[3] if len(parts) > 3 else None
     title = resolve_track_title(t_key)
     if not title:
         await safe_answer(callback, "⚠️ Помилка ідентифікації тайтлу", show_alert=True)
@@ -1817,12 +1876,14 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
 
     chat_id = callback.message.chat.id
     sub = get_subscription_by_title(chat_id, title)
-    pref = sub["pref_type"] if sub else "any"
+    pref = req_pref or (sub["pref_type"] if sub else "dub")
 
     catalog = await fetch_ongoings_catalog("ridnyiholos")
     cat_item = None
+    norm_search = normalize_title_for_match(title)
     for c_title, c_data in catalog.items():
-        if title.lower() in c_title.lower() or c_title.lower() in title.lower():
+        norm_c = normalize_title_for_match(c_title)
+        if norm_search and norm_c and (norm_search in norm_c or norm_c in norm_search):
             cat_item = c_data
             break
 
@@ -1832,8 +1893,9 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
     cancel_id = f"fex_ep_{t_key}_{ep_num}"
     cancel_kb = build_cancel_keyboard(cancel_id)
 
+    pref_tag = "🎙 Озвучення" if pref == "dub" else ("📝 Субтитри" if pref == "sub" else "Озвучення + Субтитри")
     status_msg = await callback.message.answer(
-        f"📥 <b>Завантаження {ep_num} серії «{title}»...</b>\n"
+        f"📥 <b>Завантаження {ep_num} серії «{title}» ({pref_tag})...</b>\n"
         "🔍 Шукаю файл роздачі (4K / 1080p)...",
         reply_markup=cancel_kb
     )
@@ -1842,10 +1904,12 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
     t_folder = DOWNLOADS_DIR / clean_t
     t_folder.mkdir(parents=True, exist_ok=True)
 
-    # Шукаємо FEX share_key: спочатку з cat_item або sub, потім по всіх постах тайтлу
-    share_key = cat_item.get("fex_share_key")
-    if not share_key and sub and sub.get("fex_url"):
+    # Шукаємо FEX share_key: спочатку зі збереженої підписки (разом з ID підпапки), потім з каталогу
+    share_key = None
+    if sub and sub.get("fex_url"):
         share_key = FexDownloader.extract_share_key(sub["fex_url"])
+    if not share_key:
+        share_key = cat_item.get("fex_share_key")
     if not share_key:
         for p in cat_item.get("posts", []):
             for l_lbl, l_url in p.get("links", []):
@@ -1859,6 +1923,11 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
     files = []
     if share_key:
         files = await FexDownloader.get_files_in_share(share_key)
+        if len(files) > 25:
+            norm_t = normalize_title_for_match(title)
+            title_matched = [f for f in files if norm_t and norm_t[:15] in normalize_title_for_match(f.get("name", ""))]
+            if title_matched:
+                files = title_matched
 
     # Шукаємо файл саме для цієї серії у FEX
     ep_patterns = [
@@ -1933,6 +2002,7 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
 
     if dl_url:
         if platform.system() != "Darwin":
+            dub_sub_label = "Озвучення (DUB)" if pref == "dub" else ("Субтитри (SUB)" if pref == "sub" else "Озвучення + Субтитри")
             cmd_payload = json.dumps({
                 "url": dl_url,
                 "token": tok,
@@ -1943,7 +2013,7 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
                 "chat_id": chat_id,
                 "msg_id": status_msg.message_id,
                 "quality": "4K Ultra HD" if "2160p" in f_name else "1080p Full HD",
-                "dub_sub": "Озвучення + Субтитри"
+                "dub_sub": dub_sub_label
             })
             queue_mac_command("download_fex", cmd_payload)
             await status_msg.edit_text(
@@ -4218,6 +4288,11 @@ async def channel_monitoring_loop(bot: Bot):
                         t_folder.mkdir(parents=True, exist_ok=True)
                         files = await FexDownloader.get_files_in_share(share_key)
                         if files:
+                            if len(files) > 25:
+                                norm_t = normalize_title_for_match(display_title)
+                                title_matched = [f for f in files if norm_t and norm_t[:15] in normalize_title_for_match(f.get("name", ""))]
+                                if title_matched:
+                                    files = title_matched
                             all_share_names = [f.get("name", "") for f in files]
                             if post.get("ep_num"):
                                 ep_n = post["ep_num"]
