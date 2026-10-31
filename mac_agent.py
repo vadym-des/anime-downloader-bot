@@ -660,6 +660,15 @@ async def run_agent_loop():
                             folders_needing_posters = data.get("missing_posters", [])
                             commands = data.get("commands", [])
                             for cmd in commands:
+                                if cmd.get("action") == "restart_agent":
+                                    executed_ids.append(cmd["id"])
+                                    payload["executed_command_ids"] = executed_ids
+                                    try:
+                                        await session.post(f"{SERVER_URL}/api/mac/heartbeat", json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=5))
+                                    except Exception:
+                                        pass
+                                    logger.info("Отримано команду restart_agent. Перезапускаю MacAgent...")
+                                    os.execv(sys.executable, [sys.executable] + sys.argv)
                                 success = await execute_command(cmd)
                                 if success:
                                     executed_ids.append(cmd["id"])

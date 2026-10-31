@@ -92,6 +92,10 @@ from update_manager import (
     check_for_new_release,
     auto_reload_watcher,
     init_update_db,
+    get_current_git_info,
+    pull_latest_from_github,
+    save_manual_restart_request,
+    pop_manual_restart_request,
 )
 
 logging.basicConfig(
@@ -811,6 +815,7 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text="🖥 Стан ноута"),
+                KeyboardButton(text="🔄 Рестарт бота"),
             ]
         ],
         resize_keyboard=True,
@@ -898,15 +903,37 @@ async def cmd_status(message: Message):
         uptime_str = f"{uptime_sec // 3600}год {(uptime_sec % 3600) // 60}хв {uptime_sec % 60}с"
         folder_str = str(DOWNLOADS_DIR)
 
+    git_sha, git_msg = get_current_git_info()
     await message.reply(
         f"🖥 <b>Стан вашого Mac ({device_name}):</b>\n\n"
         f"{status_dot} <b>Зв'язок:</b> {status_text}\n"
         f"⏱ <b>Uptime:</b> {uptime_str}\n"
         f"💾 <b>Вільне місце на SSD:</b> <code>{free_gb:.1f} ГБ</code>\n"
         f"📂 <b>Локальна папка:</b> <code>{folder_str}</code>\n"
-        f"🏷 <b>Тег Finder:</b> 🟢 {TAG_NAME}",
+        f"🏷 <b>Тег Finder:</b> 🟢 {TAG_NAME}\n"
+        f"📦 <b>Версія бота:</b> <code>v{CURRENT_VERSION} (#{git_sha})</code>",
         reply_markup=get_main_reply_keyboard(),
     )
+
+
+@dp.message(Command("restart"))
+@dp.message(Command("update"))
+@dp.message(F.text == "🔄 Рестарт бота")
+async def cmd_restart_bot(message: Message):
+    """Миттєво оновлює код із GitHub (якщо є свіжі коміти), перезапускає бота та MacAgent і підтверджує отримання найновішого оновлення."""
+    if not is_user_allowed(message.from_user.id):
+        return
+
+    status_msg = await message.reply(
+        "🔄 <b>Перезапуск та перевірка оновлень бота...</b>\n"
+        "⏳ <i>Синхронізую найновішу версію з GitHub та перезапускаю сервіси...</i>",
+        reply_markup=get_main_reply_keyboard(),
+    )
+    queue_mac_command("restart_agent")
+    updated, sha, commit_msg = await pull_latest_from_github()
+    save_manual_restart_request(message.chat.id, status_msg.message_id)
+    await asyncio.sleep(0.5)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 @dp.message(F.text == "ℹ️ Допомога")
@@ -2383,7 +2410,7 @@ def detect_tracks_label(filename: str, title: str = "", chat_id: Optional[int] =
             norm_t = normalize_title_for_match(title)
             with sqlite3.connect(DB_PATH) as conn:
                 conn.row_factory = sqlite3.Row
-                rows = conn.execute("SELECT title, pref_type FROM subscriptions").fetchall()
+                rows = conn.execute("SELECT title, pref_type FROM anime_subscriptions").fetchall()
                 for r in rows:
                     nt = normalize_title_for_match(r["title"])
                     if norm_t and nt and (norm_t in nt or nt in norm_t):
@@ -4596,6 +4623,27 @@ async def main():
         check_for_new_release()
     except Exception:
         pass
+
+    # Якщо перезапуск було викликано вручну кнопкою «🔄 Рестарт бота» — звітуємо користувачу
+    try:
+        restart_req = pop_manual_restart_request()
+        if restart_req:
+            r_chat_id, r_msg_id = restart_req
+            git_sha, git_msg = get_current_git_info()
+            now_str = time.strftime("%H:%M:%S")
+            done_text = (
+                f"✅ <b>Бот успішно перезапущено! Найновіше оновлення активне.</b>\n\n"
+                f"📦 <b>Версія:</b> <code>v{CURRENT_VERSION}</code> (коміт <code>#{git_sha}</code>)\n"
+                f"📝 <b>Останнє оновлення:</b> <i>{git_msg}</i>\n"
+                f"🍏 <b>MacAgent:</b> синхронізовано\n"
+                f"⏱ <b>Час оновлення:</b> <code>{now_str}</code>"
+            )
+            try:
+                await bot.edit_message_text(chat_id=r_chat_id, message_id=r_msg_id, text=done_text)
+            except Exception:
+                await bot.send_message(chat_id=r_chat_id, text=done_text, reply_markup=get_main_reply_keyboard())
+    except Exception as e_rest:
+        logger.debug(f"Помилка звіту про ручний рестарт: {e_rest}")
 
     # Запускаємо фонові монітори
     asyncio.create_task(mac_sleep_watchdog(bot))

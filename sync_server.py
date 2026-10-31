@@ -43,7 +43,9 @@ class HeartbeatPayload(BaseModel):
 
 @api_app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "anime-mac-bridge"}
+    from update_manager import CURRENT_VERSION, get_current_git_info
+    sha, msg = get_current_git_info()
+    return {"status": "ok", "service": "anime-mac-bridge", "version": CURRENT_VERSION, "git_sha": sha, "commit_msg": msg}
 
 
 @api_app.get("/api/mac/debug")
