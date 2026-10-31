@@ -335,7 +335,15 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
             msg_id = data.get("msg_id")
             poster_url = data.get("poster_url")
             quality = data.get("quality", "4K Ultra HD")
-            dub_sub = data.get("dub_sub", "Озвучення (DUB) або Субтитри (SUB)")
+            raw_dub_sub = data.get("dub_sub", "")
+            fn_up = f_name.upper()
+            if raw_dub_sub in ("", "Озвучення + Субтитри", "Озвучення (DUB) або Субтитри (SUB)"):
+                if "SUB" in fn_up and not any(k in fn_up for k in ("MVO", "DUB", "ОЗВУЧ")):
+                    dub_sub = "Субтитри (SUB)"
+                else:
+                    dub_sub = "Озвучення (DUB)"
+            else:
+                dub_sub = raw_dub_sub
             ep_num = data.get("episode", 1)
 
             target_folder = DOWNLOADS_DIR / folder_name
@@ -451,7 +459,15 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
             folder_name = data.get("folder") or title
             f_name = data.get("filename") or f"episode_{data.get('episode', 1)}.mp4"
             quality = data.get("quality", "1080p Full HD")
-            dub_sub = data.get("dub_sub", "Субтитри (SUB)")
+            raw_dub_sub = data.get("dub_sub", "")
+            fn_up = f_name.upper()
+            if raw_dub_sub in ("", "Озвучення + Субтитри", "Озвучення (DUB) або Субтитри (SUB)"):
+                if any(k in fn_up for k in ("MVO", "DUB", "ОЗВУЧ")):
+                    dub_sub = "Озвучення (DUB)"
+                else:
+                    dub_sub = "Субтитри (SUB)"
+            else:
+                dub_sub = raw_dub_sub
             ep_num = data.get("episode", 1)
 
             target_folder = DOWNLOADS_DIR / folder_name

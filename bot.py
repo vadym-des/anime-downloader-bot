@@ -563,13 +563,8 @@ async def notify_download_finished(
     ep_m = re.search(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]", fname)
     ep_badge = f" [Серія {int(ep_m.group(1))}]" if ep_m else ""
 
-    quality_str = "4K Ultra HD" if "2160p" in fname else ("1080p Full HD" if "1080p" in fname else "")
-    tracks_list = []
-    if "MVO" in fname or "Озвуч" in fname:
-        tracks_list.append("Озвучення")
-    if "SUB" in fname or "Саб" in fname:
-        tracks_list.append("Субтитри")
-    tracks_label = " + ".join(tracks_list) if tracks_list else "Оригінал"
+    quality_str = "4K Ultra HD" if "2160p" in fname else ("1080p Full HD" if "1080p" in fname else "1080p Full HD")
+    tracks_label = detect_tracks_label(fname, title, chat_id)
 
     caption = (
         f"{prefix_text}\n\n"
@@ -1003,8 +998,12 @@ def build_track_main_menu(chat_id: int) -> Tuple[str, InlineKeyboardMarkup]:
                 pref_label = "🎙+📝 Озвучення + Субтитри"
             text += f"<b>{idx}.</b> 🎬 {s['title']}\n      └ <i>{pref_label} • {src}</i>\n\n"
             t_key = register_track_title(s["title"])
+            short_t = format_anime_display_name(s["title"], max_len=16)
             kb_rows.append([
-                InlineKeyboardButton(text=f"{idx}. 🎬 {s['title'][:26]}", callback_data=f"track_card:{t_key}"),
+                InlineKeyboardButton(
+                    text=left_align_button_text(f"{idx}. 🎬 {short_t}", target_width=18.5),
+                    callback_data=f"track_card:{t_key}"
+                ),
                 InlineKeyboardButton(text="❌ Відписатися", callback_data=f"untrack:{s['id']}"),
             ])
 
@@ -1785,7 +1784,7 @@ async def cb_track_batch_go(callback: CallbackQuery, bot: Bot):
                         "chat_id": chat_id,
                         "msg_id": None,
                         "quality": "4K Ultra HD" if "2160p" in f_name else "1080p Full HD",
-                        "dub_sub": "Озвучення + Субтитри"
+                        "dub_sub": detect_tracks_label(f_name, title, chat_id)
                     })
                     queue_mac_command("download_fex", cmd_payload)
                     success_count += 1
@@ -2328,31 +2327,126 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: 
     return "\n".join(lines)
 
 
+def _visual_char_width(ch: str) -> float:
+    """Приблизна відносна візуальна ширина символу у шрифті SF Pro Text (Telegram Desktop macOS)."""
+    if ch == "\u2800":
+        return 1.32
+    if ord(ch) > 0x1F000:
+        return 2.2
+    if ch in " .,:;!'|іІїЇлЛтТ()[]-":
+        return 0.58
+    if ch in "ЖШЩМЮФЫжшщмюфыWMWm":
+        return 1.35
+    if ch.isupper():
+        return 1.15
+    return 0.95
+
+
+def left_align_button_text(text: str, target_width: float = 39.5) -> str:
+    """Додає невидимі символи Braille Blank (U+2800) праворуч до єдиної візуальної ширини,
+    щоб усі кнопки списку аніме в Telegram були рівно прибиті до лівого краю без обрізання '...' посередині."""
+    cur_w = sum(_visual_char_width(c) for c in text)
+    if cur_w >= target_width:
+        return text
+    pad_count = int(round((target_width - cur_w) / 1.32))
+    if pad_count <= 0:
+        return text
+    return text + ("\u2800" * pad_count)
+
+
+def detect_tracks_label(filename: str, title: str = "", chat_id: Optional[int] = None) -> str:
+    """Точно визначає тип доріжки скачаної серії: Озвучення (DUB) чи Субтитри (SUB).
+    У релізах @ridnyiholos файли з озвученням на FEX.NET мають тег '[UKR MVO, UKR SUB].mkv'
+    (основна аудіодоріжка — українське озвучення MVO + вшиті написи/субтитри в контейнері MKV),
+    тоді як релізи тільки з субтитрами мають тег '[UKR SUB]' або 'RH SUB' без 'MVO'."""
+    fn_upper = (filename or "").upper()
+    title_upper = (title or "").upper()
+
+    has_mvo = any(k in fn_upper for k in ("MVO", "DUB", "ОЗВУЧ"))
+    has_sub = any(k in fn_upper for k in ("SUB", "САБ", "СУБТИТР"))
+
+    # 1. Якщо у файлі явно вказано SUB і немає MVO/DUB/ОЗВУЧ — це чисті Субтитри (SUB)
+    if has_sub and not has_mvo:
+        return "Субтитри (SUB)"
+    if ("[РГ SUB]" in title_upper or "RH SUB" in fn_upper or "[UKR SUB]" in fn_upper) and not has_mvo:
+        return "Субтитри (SUB)"
+
+    # 2. Перевіряємо підписку користувача на цей тайтл
+    sub = None
+    if chat_id and title:
+        try:
+            sub = get_subscription_by_title(chat_id, title)
+        except Exception:
+            sub = None
+    elif title and DB_PATH.exists():
+        try:
+            norm_t = normalize_title_for_match(title)
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute("SELECT title, pref_type FROM subscriptions").fetchall()
+                for r in rows:
+                    nt = normalize_title_for_match(r["title"])
+                    if norm_t and nt and (norm_t in nt or nt in norm_t):
+                        sub = dict(r)
+                        break
+        except Exception:
+            pass
+
+    if sub:
+        pref = sub.get("pref_type", "dub")
+        if pref == "sub":
+            return "Субтитри (SUB)"
+        if pref == "dub":
+            return "Озвучення (DUB)"
+
+    # 3. Якщо у файлі є MVO / DUB / ОЗВУЧ — це реліз в Озвученні (DUB)
+    if has_mvo:
+        return "Озвучення (DUB)"
+    if has_sub:
+        return "Субтитри (SUB)"
+
+    return "Озвучення (DUB)"
+
+
 def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int) -> InlineKeyboardMarkup:
-    """Будує інтерактивну клавіатуру: якщо серія одна — перехід до неї, якщо кілька — папка тайтлу."""
+    """Будує інтерактивну клавіатуру: кнопки аніме вирівняні по лівому краю, кнопки дій знизу — по центру."""
     keyboard_rows = []
 
     idx = 1
     for title, files in grouped_anime.items():
-        clean_title = format_anime_display_name(title, max_len=40)
+        clean_title = format_anime_display_name(title, max_len=27)
         has_active = any(is_file_currently_playing(register_file(f)) for f in files)
         icon = "👀" if has_active else ("📁" if len(files) > 1 else "🎬")
 
+        # Визначаємо номери серій для компактного підпису кнопки
+        ep_numbers = []
+        for f in files:
+            ep = extract_episode_number_from_filename(f.name) or extract_episode_number_from_filename(title)
+            if ep and ep not in ep_numbers:
+                ep_numbers.append(ep)
+        ep_numbers.sort()
+
         if len(files) > 1:
             t_key = register_title_folder(files[0].parent)
+            if ep_numbers:
+                ep_str = f" (Еп. {', '.join(str(e) for e in ep_numbers)})"
+            else:
+                ep_str = f" ({len(files)} сер.)"
+            btn_label = left_align_button_text(f"{idx}. {icon} {clean_title}{ep_str}")
             keyboard_rows.append([
                 InlineKeyboardButton(
-                    text=f"{icon} {idx}. {clean_title} (скачано {len(files)} серій)",
+                    text=btn_label,
                     callback_data=f"title:{t_key}"
                 )
             ])
         else:
             file_key = register_file(files[0])
-            ep = extract_episode_number_from_filename(files[0].name) or extract_episode_number_from_filename(title)
+            ep = ep_numbers[0] if ep_numbers else None
             ep_str = f" (Еп. {ep})" if ep else ""
+            btn_label = left_align_button_text(f"{idx}. {icon} {clean_title}{ep_str}")
             keyboard_rows.append([
                 InlineKeyboardButton(
-                    text=f"{icon} {idx}. {clean_title}{ep_str}",
+                    text=btn_label,
                     callback_data=f"item:{file_key}"
                 )
             ])
@@ -2467,6 +2561,7 @@ async def cb_title_screen(callback: CallbackQuery):
         file_key = register_file(vf)
         raw_ep = vf.stem
         ep_name = format_anime_display_name(raw_ep, max_len=45)
+        ep_btn_name = format_anime_display_name(raw_ep, max_len=25)
         c_size = format_compact_size(vf.stat().st_size)
         is_active = is_file_currently_playing(file_key)
         icon = "👀" if is_active else "🎬"
@@ -2475,7 +2570,7 @@ async def cb_title_screen(callback: CallbackQuery):
 
         keyboard_rows.append([
             InlineKeyboardButton(
-                text=f"{icon} {idx}. {ep_name} ({c_size})",
+                text=left_align_button_text(f"{idx}. {icon} {ep_btn_name} ({c_size})"),
                 callback_data=f"item:{file_key}"
             )
         ])
@@ -2903,25 +2998,8 @@ async def cb_item_menu(callback: CallbackQuery):
     ep_m = re.search(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]", fname)
     ep_badge = f" [Серія {int(ep_m.group(1))}]" if ep_m else ""
 
-    quality_str = "4K Ultra HD" if "2160p" in fname else ("1080p Full HD" if "1080p" in fname else "")
-    tracks_list = []
-    if "MVO" in fname or "Озвуч" in fname:
-        tracks_list.append("Озвучення")
-    if "SUB" in fname or "Саб" in fname:
-        tracks_list.append("Субтитри")
-    tracks_label = " + ".join(tracks_list) if tracks_list else "Оригінал"
-
-    # Формування точного опису замовлення за ТЗ користувача:
-    # 🎬 Назва тайтлу [Серія 17]
-    # 🎞 Якість: 4K Ultra HD (або 1080p Full HD)
-    #
-    # 🔊 Доріжки: Озвучення (DUB) або Субтитри (SUB)
-    # 🏷 Finder: 🟢 На черзі глянути
-    #
-    # 📦 Розмір: 1.28 ГБ
-    tracks_label = " + ".join(tracks_list) if tracks_list else "Озвучення (DUB)"
-    if not quality_str:
-        quality_str = "1080p Full HD"
+    quality_str = "4K Ultra HD" if "2160p" in fname else ("1080p Full HD" if "1080p" in fname else "1080p Full HD")
+    tracks_label = detect_tracks_label(fname, clean_title, callback.from_user.id)
 
     text = (
         f"🎬 <b>{clean_title}</b>{ep_badge}\n"
@@ -3195,16 +3273,7 @@ async def handle_media_file(message: Message, bot: Bot):
 
     meta_low = meta_src.lower()
     quality_str = "4K Ultra HD" if ("2160p" in meta_low or "4k" in meta_low) else ("1080p Full HD" if "1080p" in meta_low else "1080p Full HD")
-    has_mvo = any(w in meta_low for w in ("mvo", "озвуч", "dub"))
-    has_sub = any(w in meta_low for w in ("sub", "саб", "субтитр"))
-    if has_mvo and has_sub:
-        tracks_str = "Озвучення + Субтитри"
-    elif has_sub:
-        tracks_str = "Субтитри (SUB)"
-    elif has_mvo:
-        tracks_str = "Озвучення (DUB)"
-    else:
-        tracks_str = "Озвучення + Субтитри"
+    tracks_str = detect_tracks_label(meta_src, caption_title or "", message.chat.id)
 
     # Якщо Telegram не передав оригінальне ім'я файлу (наприклад episode.mp4), формуємо інформативну назву з підпису
     if filename in ("episode.mp4", "video.mkv") and first_caption_line:
@@ -3789,7 +3858,7 @@ async def handle_anime_message(message: Message, bot: Bot):
                 # Якщо ми на віддаленому сервері Linux (Railway) -> перенаправляємо завантаження на локальний Mac!
                 if platform.system() != "Darwin":
                     q_str = "4K Ultra HD" if "2160p" in file_name else ("1080p Full HD" if "1080p" in file_name else "Full HD")
-                    t_str = "Озвучення (DUB)" if ("MVO" in file_name or "Озвуч" in file_name) else ("Субтитри (SUB)" if ("SUB" in file_name or "Саб" in file_name) else "Озвучення + Субтитри")
+                    t_str = detect_tracks_label(file_name, title or clean_t, message.chat.id)
                     cmd_payload = json.dumps({
                         "url": download_url,
                         "token": token,
@@ -4322,7 +4391,7 @@ async def channel_monitoring_loop(bot: Bot):
                                         "chat_id": user_chat,
                                         "msg_id": notify_msg.message_id if notify_msg else None,
                                         "quality": "4K Ultra HD" if "2160p" in dest.name else "1080p Full HD",
-                                        "dub_sub": "Озвучення + Субтитри"
+                                        "dub_sub": detect_tracks_label(dest.name, display_title, user_chat)
                                     })
                                     queue_mac_command("download_fex", cmd_payload)
                                     continue
@@ -4391,7 +4460,7 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
             "filename": f_name,
             "chat_id": chat_id,
             "quality": "4K Ultra HD" if "2160p" in f_name else "1080p Full HD",
-            "dub_sub": "Озвучення + Субтитри"
+            "dub_sub": detect_tracks_label(f_name, title, chat_id)
         })
         queue_mac_command("download_fex", cmd_payload)
         return True
