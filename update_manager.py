@@ -16,7 +16,7 @@ logger = logging.getLogger("UpdateManager")
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "file_registry.db"
 ROOT_DIR = BASE_DIR.parent
-CURRENT_VERSION = "2.5.0"
+CURRENT_VERSION = "2.5.1"
 GITHUB_REPO = "vadym-des/anime-downloader-bot"
 
 # Список спостережуваних файлів коду для автоперезапуску та хмарного Hot-Pull

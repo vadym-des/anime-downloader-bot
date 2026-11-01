@@ -1,4 +1,5 @@
 import hashlib
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -40,6 +41,17 @@ def init_mac_sync_db():
                 status TEXT DEFAULT 'pending',
                 created_at REAL NOT NULL,
                 executed_at REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mac_handled_episodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                title_norm TEXT NOT NULL,
+                episode INTEGER NOT NULL,
+                file_name TEXT,
+                handled_at REAL NOT NULL,
+                UNIQUE(chat_id, title_norm, episode)
             )
         """)
         conn.commit()
@@ -132,4 +144,51 @@ def mark_mac_command_done(cmd_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE mac_pending_commands SET status = 'done', executed_at = ? WHERE id = ?", (time.time(), cmd_id))
         conn.commit()
+
+
+def is_episode_handled_or_downloaded(chat_id: int, title: str, ep_num: int) -> bool:
+    """Перевіряє, чи ця серія вже була завантажена, поставлена в чергу або вже є на Mac."""
+    if not title or not ep_num:
+        return False
+    from channel_monitor import normalize_title_for_match
+    t_norm = normalize_title_for_match(title)
+    init_mac_sync_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        # 1. Перевіряємо mac_handled_episodes (за останні 24 години)
+        row = conn.execute(
+            "SELECT handled_at FROM mac_handled_episodes WHERE chat_id = ? AND title_norm = ? AND episode = ?",
+            (chat_id, t_norm, ep_num)
+        ).fetchone()
+        if row and (time.time() - row[0]) < 86400:
+            return True
+
+        # 2. Перевіряємо mac_local_files (файли, що вже лежать на Mac)
+        ep_pats = [
+            rf"\[0?{ep_num}\s*(?:з|/|-|\])",
+            rf"S\d+E0?{ep_num}\b",
+            rf"\b0?{ep_num}\s*сері",
+        ]
+        files = conn.execute("SELECT folder_name, file_name FROM mac_local_files").fetchall()
+        for folder_name, file_name in files:
+            f_norm = normalize_title_for_match(folder_name)
+            if (f_norm and (f_norm in t_norm or t_norm in f_norm)) or (title.lower() in folder_name.lower()):
+                if any(re.search(pat, file_name, re.IGNORECASE) for pat in ep_pats):
+                    return True
+    return False
+
+
+def mark_episode_handled(chat_id: int, title: str, ep_num: int, file_name: str = ""):
+    """Зберігає факт обробки серії, щоб запобігти подвійним сповіщенням та перезавантаженням."""
+    if not title or not ep_num:
+        return
+    from channel_monitor import normalize_title_for_match
+    t_norm = normalize_title_for_match(title)
+    init_mac_sync_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO mac_handled_episodes (chat_id, title_norm, episode, file_name, handled_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (chat_id, t_norm, ep_num, file_name, time.time()))
+        conn.commit()
+
 

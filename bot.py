@@ -38,6 +38,8 @@ from mac_sync_schema import (
     get_mac_device_state,
     get_synced_mac_files,
     queue_mac_command,
+    is_episode_handled_or_downloaded,
+    mark_episode_handled,
 )
 from sync_server import run_sync_server
 from channel_monitor import (
@@ -4359,6 +4361,12 @@ async def channel_monitoring_loop(bot: Bot):
                         continue
 
                     # ВАРІАНТ 2: Тайтл із FEX.NET (Повний авто-пілот у 4K/1080p)
+                    ep_n = post.get("ep_num")
+                    if ep_n and is_episode_handled_or_downloaded(user_chat, display_title, ep_n):
+                        logger.info(f"Серія «{display_title}» [Серія {ep_n}] вже завантажена або в черзі. Пропуск дублікату з каналу.")
+                        mark_post_seen(ch, pid)
+                        continue
+
                     header_notify = (
                         f"🔔 <b>Вийшла нова серія:</b> <code>{display_title}</code>{ep_text}{type_text}!\n"
                         f"📡 <i>Канал:</i> @{ch}\n"
@@ -4371,6 +4379,8 @@ async def channel_monitoring_loop(bot: Bot):
                         text=header_notify,
                         disable_notification=quiet
                     )
+                    if ep_n:
+                        mark_episode_handled(user_chat, display_title, ep_n)
 
                     share_key = FexDownloader.extract_share_key(fex_link) if fex_link else None
                     if not share_key:
@@ -4477,6 +4487,26 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
     if dest.exists() and dest.stat().st_size > 10 * 1024 * 1024:
         return True
 
+    # Захист від повторного завантаження серії, що вже є на Mac або в черзі
+    if is_episode_handled_or_downloaded(chat_id, title, episode):
+        logger.info(f"FEX-watcher: серія «{title}» [Серія {episode}] вже завантажена або в черзі на Mac. Пропуск.")
+        return True
+
+    dub_sub = detect_tracks_label(f_name, title, chat_id)
+    quality = "4K Ultra HD" if ("2160p" in f_name or "4k" in f_name.lower()) else "1080p Full HD"
+
+    cancel_id = f"auto_{uuid.uuid4().hex[:8]}"
+    notify_msg = await bot.send_message(
+        chat_id,
+        f"🔔 <b>Вийшла нова серія:</b> <code>{title}</code> [Серія {episode}]\n"
+        f"🎞 <b>Якість:</b> {quality} • 🔊 <b>Доріжки:</b> {dub_sub}\n\n"
+        "🚀 <b>Починаю автоматичне завантаження на ваш Mac...</b>",
+        reply_markup=build_cancel_keyboard(cancel_id) if platform.system() == "Darwin" else None,
+        disable_notification=quiet,
+    )
+
+    mark_episode_handled(chat_id, title, episode, f_name)
+
     if platform.system() != "Darwin":
         cmd_payload = json.dumps({
             "url": dl_url,
@@ -4486,20 +4516,12 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
             "folder": clean_t,
             "filename": f_name,
             "chat_id": chat_id,
-            "quality": "4K Ultra HD" if "2160p" in f_name else "1080p Full HD",
-            "dub_sub": detect_tracks_label(f_name, title, chat_id)
+            "msg_id": notify_msg.message_id if notify_msg else None,
+            "quality": quality,
+            "dub_sub": dub_sub
         })
         queue_mac_command("download_fex", cmd_payload)
         return True
-
-    cancel_id = f"auto_{uuid.uuid4().hex[:8]}"
-    notify_msg = await bot.send_message(
-        chat_id,
-        f"🔔 <b>Вийшла нова серія:</b> <code>{title}</code> [Серія {episode}]\n"
-        "🚀 <b>Починаю автоматичне завантаження на Mac...</b>",
-        reply_markup=build_cancel_keyboard(cancel_id),
-        disable_notification=quiet,
-    )
     tracker = DownloadProgressTracker(interval_seconds=2.5)
 
     async def on_prog(downloaded: int, total: int):

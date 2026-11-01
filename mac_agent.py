@@ -53,6 +53,7 @@ logger = logging.getLogger("MacAgent")
 
 VIDEO_EXTS = (".mkv", ".mp4", ".webm", ".avi", ".mov", ".m4v")
 START_TIME = time.time()
+RECENT_COMPLETED_CARDS: Dict[str, float] = {}
 
 # URL сервера (встановлюється в .env як RAILWAY_API_URL або береться публічний домен Railway)
 SERVER_URL = os.getenv("RAILWAY_API_URL", "https://anime-downloader-bot-production.up.railway.app").rstrip("/")
@@ -364,6 +365,21 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
             existing_ep = find_existing_episode_in_folder(target_folder, dest_file, ep_num)
             if existing_ep:
                 dest_file = existing_ep
+                card_dedup_key = f"{folder_name}_{ep_num}"
+                now_ts = time.time()
+                if card_dedup_key in RECENT_COMPLETED_CARDS and (now_ts - RECENT_COMPLETED_CARDS[card_dedup_key]) < 1800:
+                    logger.info(f"Файл {dest_file.name} вже існує, картка надсилалась {int(now_ts - RECENT_COMPLETED_CARDS[card_dedup_key])}с тому. Пропуск дублікату.")
+                    if msg_id:
+                        try:
+                            await edit_tg_status(
+                                bot_token,
+                                chat_id,
+                                msg_id,
+                                f"ℹ️ <b>{title} [Серія {ep_num}]</b> вже завантажена на ваш Mac!\n📂 <code>{dest_file.name}</code>"
+                            )
+                        except Exception:
+                            pass
+                    return True
                 logger.info(f"Файл {dest_file.name} вже існує на Mac. Пропуск завантаження, відправляю картку.")
             else:
                 logger.info(f"Початок локального завантаження 4K на Mac SSD: {f_name}")
@@ -448,6 +464,7 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                 quality=quality,
                 dub_sub=dub_sub,
             )
+            RECENT_COMPLETED_CARDS[f"{folder_name}_{ep_num}"] = time.time()
             return True
 
         elif action == "download_tg_media":
@@ -577,6 +594,7 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                 quality=quality,
                 dub_sub=dub_sub,
             )
+            RECENT_COMPLETED_CARDS[f"{folder_name}_{ep_num}"] = time.time()
             return True
 
     except Exception as e:
