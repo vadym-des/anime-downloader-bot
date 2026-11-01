@@ -1025,12 +1025,12 @@ def build_track_main_menu(chat_id: int) -> Tuple[str, InlineKeyboardMarkup]:
                 pref_label = "🎙 Тільки озвучення [DUB]"
             else:
                 pref_label = "🎙+📝 Озвучення + Субтитри"
-            text += f"<b>{idx}.</b> 🎬 {s['title']}\n      └ <i>{pref_label} • {src}</i>\n\n"
+            text += f"<b>{idx}.</b> {s['title']}\n      └ <i>{pref_label} • {src}</i>\n\n"
             t_key = register_track_title(s["title"])
             short_t = format_anime_display_name(s["title"], max_len=16)
             kb_rows.append([
                 InlineKeyboardButton(
-                    text=left_align_button_text(f"{idx}. 🎬 {short_t}", target_width=18.5),
+                    text=left_align_button_text(f"{idx}. {short_t}", target_width=18.5),
                     callback_data=f"track_card:{t_key}"
                 ),
                 InlineKeyboardButton(text="❌ Відписатися", callback_data=f"untrack:{s['id']}"),
@@ -2350,7 +2350,7 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: 
         else:
             ep_info = f"({len(files)} серій)"
 
-        lines.append(f"<b>{idx}.</b> 🎬 {clean_title} {ep_info}{badge}")
+        lines.append(f"<b>{idx}.</b> {clean_title} {ep_info}{badge}")
         idx += 1
 
     return "\n".join(lines)
@@ -2445,7 +2445,7 @@ def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int)
     for title, files in grouped_anime.items():
         clean_title = format_anime_display_name(title, max_len=27)
         has_active = any(is_file_currently_playing(register_file(f)) for f in files)
-        icon = "👀" if has_active else ("📁" if len(files) > 1 else "🎬")
+        icon = "👀 " if has_active else ""
 
         # Визначаємо номери серій для компактного підпису кнопки
         ep_numbers = []
@@ -2461,7 +2461,7 @@ def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int)
                 ep_str = f" (Еп. {', '.join(str(e) for e in ep_numbers)})"
             else:
                 ep_str = f" ({len(files)} сер.)"
-            btn_label = left_align_button_text(f"{idx}. {icon} {clean_title}{ep_str}")
+            btn_label = left_align_button_text(f"{idx}. {icon}{clean_title}{ep_str}")
             keyboard_rows.append([
                 InlineKeyboardButton(
                     text=btn_label,
@@ -2472,7 +2472,7 @@ def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int)
             file_key = register_file(files[0])
             ep = ep_numbers[0] if ep_numbers else None
             ep_str = f" (Еп. {ep})" if ep else ""
-            btn_label = left_align_button_text(f"{idx}. {icon} {clean_title}{ep_str}")
+            btn_label = left_align_button_text(f"{idx}. {icon}{clean_title}{ep_str}")
             keyboard_rows.append([
                 InlineKeyboardButton(
                     text=btn_label,
@@ -2593,13 +2593,13 @@ async def cb_title_screen(callback: CallbackQuery):
         ep_btn_name = format_anime_display_name(raw_ep, max_len=25)
         c_size = format_compact_size(vf.stat().st_size)
         is_active = is_file_currently_playing(file_key)
-        icon = "👀" if is_active else "🎬"
+        icon = "👀 " if is_active else ""
         badge = " 👀 <i>(зараз у плеєрі)</i>" if is_active else ""
         lines.append(f"<b>{idx}.</b> {ep_name}{badge}")
 
         keyboard_rows.append([
             InlineKeyboardButton(
-                text=left_align_button_text(f"{idx}. {icon} {ep_btn_name} ({c_size})"),
+                text=left_align_button_text(f"{idx}. {icon}{ep_btn_name} ({c_size})"),
                 callback_data=f"item:{file_key}"
             )
         ])
@@ -3241,7 +3241,7 @@ async def handle_text_delete(message: Message):
             file_key = register_file(vf)
             keyboard_rows.append([
                 InlineKeyboardButton(
-                    text=f"🎬 {vf.stem[:28]} ({format_bytes(vf.stat().st_size)})",
+                    text=f"{vf.stem[:28]} ({format_bytes(vf.stat().st_size)})",
                     callback_data=f"item:{file_key}"
                 )
             ])
