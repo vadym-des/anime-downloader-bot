@@ -583,7 +583,6 @@ async def notify_download_finished(
         f"🎬 <b>{title}</b>{ep_badge}\n"
         f"🎞 <b>Якість:</b> <code>{quality_str}</code>\n"
         f"🔊 <b>Доріжки:</b> <i>{tracks_label}</i>\n"
-        f"📦 <b>Розмір:</b> <code>{size_str}</code>\n"
         f"💾 <b>Вільно на Mac:</b> <code>{free_gb:.1f} ГБ</code>"
         f"{binge_note}\n\n"
         f"📂 <b>Шлях:</b> <code>~/{dest_file.parent.name}/{dest_file.name}</code>"
@@ -2103,8 +2102,7 @@ async def cb_track_ep_dl(callback: CallbackQuery, bot: Bot):
                     text=(
                         f"🎉 <b>Серія {ep_num} успішно завантажена на Mac!</b>\n\n"
                         f"🎬 <b>Тайтл:</b> {title}\n"
-                        f"📄 <b>Файл:</b> <code>{dest.name}</code>\n"
-                        f"📦 <b>Розмір:</b> <code>{format_bytes(dest.stat().st_size)}</code>\n\n"
+                        f"📄 <b>Файл:</b> <code>{dest.name}</code>\n\n"
                         "🍿 <i>Вмикайте в IINA або переходьте до папки:</i>"
                     ),
                     reply_markup=kb_fb
@@ -2371,14 +2369,14 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: 
         lines.append(f"🟢 <b>Черга до перегляду ({len(unwatched_items)} не бачив):</b>")
         for idx, item in enumerate(unwatched_items, 1):
             badge = " 👀 <i>(зараз у плеєрі)</i>" if item["status"] == "watching" else ""
-            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']} <code>({item['size']})</code>{badge}")
+            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']}{badge}")
         lines.append("")
 
     # Секція 2: Вже переглянуті
     if watched_items:
         lines.append(f"⚪️ <b>Вже переглянуті ({len(watched_items)}):</b>")
         for idx, item in enumerate(watched_items, 1):
-            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']} <code>({item['size']})</code>")
+            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']}")
         lines.append("")
 
     if not unwatched_items and not watched_items:
@@ -2509,7 +2507,7 @@ def build_watchlist_hub_data(chat_id: int) -> Tuple[Optional[str], Optional[Inli
 
     for idx, item in enumerate(unwatched_episodes, 1):
         badge = " 👀 <i>(зараз у плеєрі)</i>" if item["status"] == "watching" else " 🟢"
-        lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']} <code>({item['size']})</code>{badge}")
+        lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']}{badge}")
 
     lines.append("\n⚡️ <i>Натисніть кнопку під серією, щоб запустити її на Mac:</i>")
 
@@ -2746,8 +2744,7 @@ async def cb_title_screen(callback: CallbackQuery):
         file_key = register_file(vf)
         raw_ep = vf.stem
         ep_name = format_anime_display_name(raw_ep, max_len=45)
-        ep_btn_name = format_anime_display_name(raw_ep, max_len=25)
-        c_size = format_compact_size(vf.stat().st_size)
+        ep_btn_name = format_anime_display_name(raw_ep, max_len=28)
         is_active = is_file_currently_playing(file_key)
         icon = "👀 " if is_active else ""
         badge = " 👀 <i>(зараз у плеєрі)</i>" if is_active else ""
@@ -2755,7 +2752,7 @@ async def cb_title_screen(callback: CallbackQuery):
 
         keyboard_rows.append([
             InlineKeyboardButton(
-                text=left_align_button_text(f"{idx}. {icon}{ep_btn_name} ({c_size})"),
+                text=left_align_button_text(f"{idx}. {icon}{ep_btn_name}"),
                 callback_data=f"item:{file_key}"
             )
         ])
@@ -3170,7 +3167,7 @@ async def cb_item_menu(callback: CallbackQuery):
                 InlineKeyboardButton(text="📂 Відкрити у Finder", callback_data=f"reveal:{file_key}"),
             ],
             [
-                InlineKeyboardButton(text=f"🗑 Видалити ({size_str})", callback_data=f"del:{file_key}")
+                InlineKeyboardButton(text="🗑 Видалити", callback_data=f"del:{file_key}")
             ],
             [
                 back_btn
@@ -3190,8 +3187,7 @@ async def cb_item_menu(callback: CallbackQuery):
         f"🎬 <b>{clean_title}</b>{ep_badge}\n"
         f"🎞 <b>Якість:</b> <code>{quality_str}</code>\n\n"
         f"🔊 <b>Доріжки:</b> <i>{tracks_label}</i>\n"
-        f"🏷 <b>Finder:</b> 🟢 {TAG_NAME}\n\n"
-        f"📦 <b>Розмір:</b> <code>{size_str}</code>"
+        f"🏷 <b>Finder:</b> 🟢 {TAG_NAME}"
     )
 
     thumb = get_video_thumbnail(file_path)
@@ -3271,8 +3267,7 @@ async def cb_delete_ask(callback: CallbackQuery):
     del_text = (
         f"❓ <b>Видалити цю серію?</b>\n\n"
         f"🎬 <b>Тайтл:</b> {clean_title}\n"
-        f"📄 <code>{file_path.name}</code>\n"
-        f"📦 <b>Розмір:</b> {format_bytes(file_path.stat().st_size)}"
+        f"📄 <code>{file_path.name}</code>"
     )
 
     try:
@@ -3385,8 +3380,7 @@ async def handle_text_delete(message: Message):
         await message.reply(
             f"🎯 <b>Знайдено файл:</b>\n"
             f"🎬 <b>Тайтл:</b> {vf.parent.name}\n"
-            f"📄 <code>{vf.name}</code>\n"
-            f"📦 <b>Розмір:</b> {format_bytes(vf.stat().st_size)}\n\n"
+            f"📄 <code>{vf.name}</code>\n\n"
             "Оберіть дію:",
             reply_markup=kb,
         )
@@ -3397,7 +3391,7 @@ async def handle_text_delete(message: Message):
             file_key = register_file(vf)
             keyboard_rows.append([
                 InlineKeyboardButton(
-                    text=f"{vf.stem[:28]} ({format_bytes(vf.stat().st_size)})",
+                    text=f"{vf.stem[:32]}",
                     callback_data=f"item:{file_key}"
                 )
             ])
@@ -3536,7 +3530,6 @@ async def handle_media_file(message: Message, bot: Bot):
             f"⚡️ <b>Ця серія вже є на вашому Mac!</b>\n\n"
             f"🎬 <b>Тайтл:</b> {clean_title}\n"
             f"📄 <b>Файл:</b> <code>{filename}</code>\n"
-            f"📦 <b>Розмір:</b> <code>{size_str}</code>\n"
             f"🏷 <b>Тег macOS Finder:</b> 🟢 <b>{TAG_NAME}</b>\n"
             f"📂 <b>Шлях:</b> <code>{dest_path}</code>\n\n"
             "▶️ <i>Можете одразу дивитися або відкрити в 1 клік:</i>",
@@ -4024,7 +4017,6 @@ async def handle_anime_message(message: Message, bot: Bot):
                         f"⚡️ <b>Ця серія з FEX.NET уже є на вашому Mac!</b>\n\n"
                         f"🎬 <b>Тайтл:</b> {clean_t}\n"
                         f"📄 <b>Файл:</b> <code>{file_name}</code>\n"
-                        f"📦 <b>Розмір:</b> <code>{size_str}</code>\n"
                         f"🏷 <b>Тег macOS Finder:</b> 🟢 <b>{TAG_NAME}</b>\n"
                         f"📂 <b>Шлях:</b> <code>{dest_file}</code>\n\n"
                         "▶️ <i>Можете одразу дивитися або відкрити в 1 клік:</i>",
@@ -4160,7 +4152,6 @@ async def handle_anime_message(message: Message, bot: Bot):
                     f"⚡️ <b>Ця серія з Telegram уже завантажена на ваш Mac!</b>\n\n"
                     f"🎬 <b>Тайтл:</b> {clean_t}\n"
                     f"📄 <b>Файл:</b> <code>{dest_file.name}</code>\n"
-                    f"📦 <b>Розмір:</b> <code>{size_str}</code>\n"
                     f"🏷 <b>Тег macOS Finder:</b> 🟢 <b>{TAG_NAME}</b>\n"
                     f"📂 <b>Шлях:</b> <code>{dest_file}</code>\n\n"
                     "▶️ <i>Можете одразу дивитися або відкрити в 1 клік:</i>",

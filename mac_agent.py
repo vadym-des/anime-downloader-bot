@@ -217,15 +217,13 @@ async def send_completed_anime_card(
     if not (bot_token and chat_id and dest_file.exists()):
         return
 
-    size_str = format_bytes(dest_file.stat().st_size)
     f_key = hashlib.md5(str(dest_file).encode("utf-8")).hexdigest()[:10]
     card_text = (
         f"✅ <b>Завантаження завершено!</b>\n\n"
         f"🎬 <b>{title} [Серія {ep_num}]</b>\n"
         f"🎞 <b>Якість:</b> {quality}\n\n"
         f"🔊 <b>Доріжки:</b> {dub_sub}\n"
-        f"🏷 <b>Finder:</b> 🟢 На черзі глянути\n\n"
-        f"📦 <b>Розмір:</b> {size_str}"
+        f"🏷 <b>Finder:</b> 🟢 На черзі глянути"
     )
     keyboard = {
         "inline_keyboard": [
@@ -234,7 +232,7 @@ async def send_completed_anime_card(
                 {"text": "📁 Відкрити у Finder", "callback_data": f"finder:{f_key}"},
             ],
             [
-                {"text": f"🗑 Видалити ({size_str})", "callback_data": f"del:{f_key}"},
+                {"text": "🗑 Видалити", "callback_data": f"del:{f_key}"},
             ],
             [
                 {"text": "⬅️ Назад до списку", "callback_data": "refresh_list"},
