@@ -40,6 +40,12 @@ from mac_sync_schema import (
     queue_mac_command,
     is_episode_handled_or_downloaded,
     mark_episode_handled,
+    get_file_watch_status,
+    get_all_watch_statuses,
+    set_file_watch_status,
+    get_watchlist_hub_msg_id,
+    set_watchlist_hub_msg_id,
+    clear_watchlist_hub_msg_id,
 )
 from sync_server import run_sync_server
 from channel_monitor import (
@@ -2316,44 +2322,69 @@ def extract_episode_number_from_filename(filename: str) -> Optional[int]:
 
 
 def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: int) -> str:
-    """Формує чистий список серій та тайтлів без зайвого візуального сміття за ТЗ."""
+    """Формує розділений список серій: окремо черга до перегляду (нові) та окремо вже переглянуті."""
     mac_state = get_mac_device_state()
     free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
     total_episodes = sum(len(files) for files in grouped_anime.values())
     titles_count = len(grouped_anime)
 
-    lines = [
-        "🎬 <b>Твої завантажені аніме на Mac</b>\n",
-        f"📁 <b>Тайтлів:</b> {titles_count}  •  🎞 <b>Серій:</b> {total_episodes}",
-        f"📦 <b>Разом:</b> <code>{format_bytes(total_size)}</code>  •  💾 <b>Вільно:</b> <code>{free_gb:.1f} ГБ</code>\n",
-        "📋 <b>Список на диску:</b>",
-    ]
+    statuses = get_all_watch_statuses()
 
-    idx = 1
+    unwatched_items = []
+    watched_items = []
+
     for title, files in grouped_anime.items():
         clean_title = format_anime_display_name(title, max_len=50)
-        has_active = any(is_file_currently_playing(register_file(f)) for f in files)
-        badge = " 👀" if has_active else ""
 
-        # Визначаємо номери серій
-        ep_numbers = []
         for f in files:
+            f_key = register_file(f)
+            st = statuses.get(f_key, "new")
+            is_active = is_file_currently_playing(f_key)
+            if is_active:
+                st = "watching"
+
             ep = extract_episode_number_from_filename(f.name) or extract_episode_number_from_filename(title)
-            if ep and ep not in ep_numbers:
-                ep_numbers.append(ep)
-        ep_numbers.sort()
+            ep_str = f" [Серія {ep}]" if ep else ""
+            c_size = format_compact_size(f.stat().st_size)
 
-        if len(ep_numbers) > 1:
-            ep_info = f"(Еп. {', '.join(str(e) for e in ep_numbers)})"
-        elif len(ep_numbers) == 1:
-            ep_info = f"(Еп. {ep_numbers[0]})"
-        else:
-            ep_info = f"({len(files)} серій)"
+            item_info = {
+                "title": clean_title,
+                "ep_str": ep_str,
+                "size": c_size,
+                "key": f_key,
+                "status": st,
+            }
 
-        lines.append(f"<b>{idx}.</b> {clean_title} {ep_info}{badge}")
-        idx += 1
+            if st == "watched":
+                watched_items.append(item_info)
+            else:
+                unwatched_items.append(item_info)
 
-    return "\n".join(lines)
+    lines = [
+        "🍿 <b>Твої аніме на Mac</b>\n",
+        f"📁 <b>Тайтлів:</b> {titles_count}  •  🎞 <b>Серій:</b> {total_episodes}",
+        f"📦 <b>Разом:</b> <code>{format_bytes(total_size)}</code>  •  💾 <b>Вільно:</b> <code>{free_gb:.1f} ГБ</code>\n",
+    ]
+
+    # Секція 1: Черга до перегляду (Нові)
+    if unwatched_items:
+        lines.append(f"🟢 <b>Черга до перегляду ({len(unwatched_items)} не бачив):</b>")
+        for idx, item in enumerate(unwatched_items, 1):
+            badge = " 👀 <i>(зараз у плеєрі)</i>" if item["status"] == "watching" else ""
+            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']} <code>({item['size']})</code>{badge}")
+        lines.append("")
+
+    # Секція 2: Вже переглянуті
+    if watched_items:
+        lines.append(f"⚪️ <b>Вже переглянуті ({len(watched_items)}):</b>")
+        for idx, item in enumerate(watched_items, 1):
+            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']} <code>({item['size']})</code>")
+        lines.append("")
+
+    if not unwatched_items and not watched_items:
+        lines.append("📋 <i>На диску немає доступних відеофайлів.</i>")
+
+    return "\n".join(lines).strip()
 
 
 def _visual_char_width(ch: str) -> float:
@@ -2437,17 +2468,113 @@ def detect_tracks_label(filename: str, title: str = "", chat_id: Optional[int] =
     return "Озвучення (DUB)"
 
 
-def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int) -> InlineKeyboardMarkup:
-    """Будує інтерактивну клавіатуру: кнопки аніме вирівняні по лівому краю, кнопки дій знизу — по центру."""
+def build_watchlist_hub_data(chat_id: int) -> Tuple[Optional[str], Optional[InlineKeyboardMarkup]]:
+    """Будує інтерактивний Watchlist Hub: зведений віджет черги до перегляду з прямими кнопками запуску кожної серії."""
+    grouped = get_grouped_anime()
+    if not grouped:
+        return None, None
+
+    statuses = get_all_watch_statuses()
+    unwatched_episodes = []
+
+    for title, files in grouped.items():
+        clean_title = format_anime_display_name(title, max_len=40)
+        for f in files:
+            f_key = register_file(f)
+            st = statuses.get(f_key, "new")
+            is_active = is_file_currently_playing(f_key)
+            if is_active:
+                st = "watching"
+
+            if st != "watched":
+                ep = extract_episode_number_from_filename(f.name) or extract_episode_number_from_filename(title)
+                ep_str = f" [Серія {ep}]" if ep else ""
+                c_size = format_compact_size(f.stat().st_size)
+                unwatched_episodes.append({
+                    "title": clean_title,
+                    "ep_str": ep_str,
+                    "size": c_size,
+                    "key": f_key,
+                    "status": st,
+                    "path": str(f),
+                })
+
+    if not unwatched_episodes:
+        return None, None
+
+    total_unwatched = len(unwatched_episodes)
+    lines = [
+        f"🍿 <b>Черга до перегляду на Mac ({total_unwatched} не бачив):</b>\n"
+    ]
+
+    for idx, item in enumerate(unwatched_episodes, 1):
+        badge = " 👀 <i>(зараз у плеєрі)</i>" if item["status"] == "watching" else " 🟢"
+        lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']} <code>({item['size']})</code>{badge}")
+
+    lines.append("\n⚡️ <i>Натисніть кнопку під серією, щоб запустити її на Mac:</i>")
+
     keyboard_rows = []
+    for idx, item in enumerate(unwatched_episodes[:6], 1):  # До 6 серій для компактності
+        short_title = format_anime_display_name(item["title"], max_len=18)
+        btn_text = f"▶️ {idx}. {short_title}{item['ep_str']}"
+        keyboard_rows.append([
+            InlineKeyboardButton(text=btn_text, callback_data=f"play:{item['key']}")
+        ])
+
+    keyboard_rows.append([
+        InlineKeyboardButton(text="📁 Усі мої аніме", callback_data="refresh_list"),
+        InlineKeyboardButton(text="🔄 Оновити статус", callback_data="hub_refresh"),
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
+async def send_or_update_watchlist_hub(bot: Bot, chat_id: int):
+    """Надсилає або плавно оновлює зведений Watchlist Hub у чаті користувача."""
+    text, kb = build_watchlist_hub_data(chat_id)
+    if not text or not kb:
+        return
+
+    old_msg_id = get_watchlist_hub_msg_id(chat_id)
+    if old_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=old_msg_id,
+                text=text,
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+            return
+        except Exception:
+            pass
+
+    # Якщо старого повідомлення немає або не вдалося відредагувати — надсилаємо нове
+    try:
+        new_msg = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        set_watchlist_hub_msg_id(chat_id, new_msg.message_id)
+    except Exception as e:
+        logger.debug(f"send_or_update_watchlist_hub error: {e}")
+
+
+def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int) -> InlineKeyboardMarkup:
+    """Будує інтерактивну клавіатуру: спочатку нові серії черги, потім переглянуті."""
+    keyboard_rows = []
+    statuses = get_all_watch_statuses()
+
+    unwatched_buttons = []
+    watched_buttons = []
 
     idx = 1
     for title, files in grouped_anime.items():
         clean_title = format_anime_display_name(title, max_len=27)
-        has_active = any(is_file_currently_playing(register_file(f)) for f in files)
-        icon = "👀 " if has_active else ""
 
-        # Визначаємо номери серій для компактного підпису кнопки
+        # Визначаємо номери серій
         ep_numbers = []
         for f in files:
             ep = extract_episode_number_from_filename(f.name) or extract_episode_number_from_filename(title)
@@ -2457,29 +2584,58 @@ def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int)
 
         if len(files) > 1:
             t_key = register_title_folder(files[0].parent)
+            # Перевіряємо чи є хоч одна непереглянута серія
+            any_unwatched = any(statuses.get(register_file(f), "new") != "watched" for f in files)
+            has_active = any(is_file_currently_playing(register_file(f)) for f in files)
+            icon = "👀 " if has_active else ("🟢 " if any_unwatched else "⚪️ ")
+
             if ep_numbers:
                 ep_str = f" (Еп. {', '.join(str(e) for e in ep_numbers)})"
             else:
                 ep_str = f" ({len(files)} сер.)"
             btn_label = left_align_button_text(f"{idx}. {icon}{clean_title}{ep_str}")
-            keyboard_rows.append([
+            btn_row = [
                 InlineKeyboardButton(
                     text=btn_label,
                     callback_data=f"title:{t_key}"
                 )
-            ])
+            ]
+            if any_unwatched:
+                unwatched_buttons.append(btn_row)
+            else:
+                watched_buttons.append(btn_row)
         else:
             file_key = register_file(files[0])
+            st = statuses.get(file_key, "new")
+            is_active = is_file_currently_playing(file_key)
+            if is_active:
+                st = "watching"
+            icon = "👀 " if st == "watching" else ("🟢 " if st == "new" else "⚪️ ")
+
             ep = ep_numbers[0] if ep_numbers else None
             ep_str = f" (Еп. {ep})" if ep else ""
             btn_label = left_align_button_text(f"{idx}. {icon}{clean_title}{ep_str}")
-            keyboard_rows.append([
+            btn_row = [
                 InlineKeyboardButton(
                     text=btn_label,
                     callback_data=f"item:{file_key}"
                 )
-            ])
+            ]
+            if st == "watched":
+                watched_buttons.append(btn_row)
+            else:
+                unwatched_buttons.append(btn_row)
         idx += 1
+
+    keyboard_rows.extend(unwatched_buttons)
+    keyboard_rows.extend(watched_buttons)
+
+    # Кнопка швидкого видалення вже переглянутих серій (якщо такі є)
+    has_watched_any = any(st == "watched" for st in statuses.values())
+    if has_watched_any:
+        keyboard_rows.append([
+            InlineKeyboardButton(text="🗑 Очистити переглянуті", callback_data="clean_watched_ask")
+        ])
 
     keyboard_rows.append([
         InlineKeyboardButton(text="📂 Відкрити папку у Finder", callback_data="reveal_folder")
@@ -3250,6 +3406,20 @@ async def handle_text_delete(message: Message):
             "Оберіть серію для перегляду або видалення:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         )
+
+
+@dp.callback_query(F.data == "hub_refresh")
+async def cb_hub_refresh(callback: CallbackQuery, bot: Bot):
+    """Оновлює віджет Watchlist Hub у чаті."""
+    text, kb = build_watchlist_hub_data(callback.message.chat.id)
+    if text and kb:
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await safe_answer(callback, "🔄 Чергу перегляду оновлено!")
+            return
+        except Exception:
+            pass
+    await safe_answer(callback, "Черга актуальна.")
 
 
 @dp.message(F.video | F.document)
@@ -4555,6 +4725,11 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
                 bot, chat_id, notify_msg, dest, title,
                 prefix_text=f"🎉 <b>Вийшла нова серія «{title}» [Серія {episode}]. Завантажено на Mac!</b>",
             )
+            # Оновлюємо віджет Watchlist Hub при завершенні локального завантаження
+            try:
+                await send_or_update_watchlist_hub(bot, chat_id)
+            except Exception:
+                pass
         return True
     except asyncio.CancelledError:
         cleanup_cancelled_download(dest, t_folder)

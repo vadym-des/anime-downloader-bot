@@ -54,6 +54,26 @@ def init_mac_sync_db():
                 UNIQUE(chat_id, title_norm, episode)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS anime_watch_status (
+                file_key TEXT PRIMARY KEY,
+                title TEXT,
+                episode INTEGER,
+                file_path TEXT,
+                file_name TEXT,
+                status TEXT DEFAULT 'new',
+                opened_at REAL,
+                watched_at REAL,
+                updated_at REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist_hub_state (
+                chat_id INTEGER PRIMARY KEY,
+                hub_message_id INTEGER,
+                updated_at REAL
+            )
+        """)
         conn.commit()
 
 
@@ -106,14 +126,17 @@ def get_mac_device_state() -> Optional[Dict[str, Any]]:
 
 
 def get_synced_mac_files() -> Dict[str, List[Dict[str, Any]]]:
-    """Повертає згруповані відеофайли з Mac."""
+    """Повертає згруповані відеофайли з Mac з актуальними статусами перегляду."""
     init_mac_sync_db()
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
+        statuses = {r[0]: r[1] for r in conn.execute("SELECT file_key, status FROM anime_watch_status").fetchall()}
         rows = conn.execute("SELECT * FROM mac_local_files ORDER BY folder_name, file_name").fetchall()
         for r in rows:
             f_dict = dict(r)
+            f_key = f_dict.get("file_key")
+            f_dict["status"] = statuses.get(f_key, "new")
             grouped.setdefault(f_dict["folder_name"], []).append(f_dict)
     return grouped
 
@@ -190,5 +213,90 @@ def mark_episode_handled(chat_id: int, title: str, ep_num: int, file_name: str =
             VALUES (?, ?, ?, ?, ?)
         """, (chat_id, t_norm, ep_num, file_name, time.time()))
         conn.commit()
+
+
+def get_file_watch_status(file_key: str) -> str:
+    """Отримує поточний статус перегляду файлу: 'new', 'watching', 'watched'."""
+    if not file_key:
+        return "new"
+    init_mac_sync_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT status FROM anime_watch_status WHERE file_key = ?", (file_key,)).fetchone()
+        return row[0] if row else "new"
+
+
+def get_all_watch_statuses() -> Dict[str, str]:
+    """Повертає словник {file_key: status}."""
+    init_mac_sync_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT file_key, status FROM anime_watch_status").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+
+def set_file_watch_status(file_key: str, status: str, title: str = "", episode: Optional[int] = None, file_path: str = "", file_name: str = ""):
+    """Встановлює статус перегляду для файлу ('new', 'watching', 'watched')."""
+    if not file_key:
+        return
+    init_mac_sync_db()
+    now = time.time()
+    with sqlite3.connect(DB_PATH) as conn:
+        existing = conn.execute("SELECT status, opened_at, watched_at, title, episode, file_path, file_name FROM anime_watch_status WHERE file_key = ?", (file_key,)).fetchone()
+        if existing:
+            opened_at = existing[1]
+            watched_at = existing[2]
+            db_title = title or existing[3]
+            db_ep = episode if episode is not None else existing[4]
+            db_path = file_path or existing[5]
+            db_fname = file_name or existing[6]
+
+            if status == "watching":
+                opened_at = now
+            elif status == "watched":
+                watched_at = now
+
+            conn.execute("""
+                UPDATE anime_watch_status
+                SET status = ?, opened_at = ?, watched_at = ?, updated_at = ?, title = ?, episode = ?, file_path = ?, file_name = ?
+                WHERE file_key = ?
+            """, (status, opened_at, watched_at, now, db_title, db_ep, db_path, db_fname, file_key))
+        else:
+            opened_at = now if status == "watching" else None
+            watched_at = now if status == "watched" else None
+            conn.execute("""
+                INSERT INTO anime_watch_status (file_key, title, episode, file_path, file_name, status, opened_at, watched_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (file_key, title, episode, file_path, file_name, status, opened_at, watched_at, now))
+        conn.commit()
+
+
+def get_watchlist_hub_msg_id(chat_id: int) -> Optional[int]:
+    """Повертає ID останнього активного повідомлення Watchlist Hub для чату."""
+    init_mac_sync_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT hub_message_id, updated_at FROM watchlist_hub_state WHERE chat_id = ?", (chat_id,)).fetchone()
+        if row and (time.time() - row[1]) < 86400:
+            return row[0]
+    return None
+
+
+def set_watchlist_hub_msg_id(chat_id: int, message_id: int):
+    """Зберігає ID повідомлення Watchlist Hub."""
+    init_mac_sync_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO watchlist_hub_state (chat_id, hub_message_id, updated_at)
+            VALUES (?, ?, ?)
+        """, (chat_id, message_id, time.time()))
+        conn.commit()
+
+
+def clear_watchlist_hub_msg_id(chat_id: int):
+    """Скидає ID повідомлення Watchlist Hub."""
+    init_mac_sync_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM watchlist_hub_state WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+
+
 
 

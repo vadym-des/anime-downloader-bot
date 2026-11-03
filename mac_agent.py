@@ -55,6 +55,19 @@ VIDEO_EXTS = (".mkv", ".mp4", ".webm", ".avi", ".mov", ".m4v")
 START_TIME = time.time()
 RECENT_COMPLETED_CARDS: Dict[str, float] = {}
 
+# Відстеження перегляду серій на Mac
+CURRENT_WATCHING_SESSION: Optional[Dict[str, Any]] = None
+PENDING_WATCH_UPDATES: List[Dict[str, Any]] = []
+
+
+def is_media_player_running() -> bool:
+    """Перевіряє, чи запущений плеєр IINA, VLC або QuickTime Player на Mac."""
+    try:
+        res = subprocess.run(["/usr/bin/pgrep", "-i", "iina|vlc|quicktime"], capture_output=True)
+        return res.returncode == 0
+    except Exception:
+        return False
+
 # URL сервера (встановлюється в .env як RAILWAY_API_URL або береться публічний домен Railway)
 SERVER_URL = os.getenv("RAILWAY_API_URL", "https://anime-downloader-bot-production.up.railway.app").rstrip("/")
 SYNC_SECRET = os.getenv("MAC_SYNC_SECRET") or (BOT_TOKEN[:16] if BOT_TOKEN else "default_secret")
@@ -300,6 +313,28 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                 else:
                     subprocess.run(["open", str(target_file)], check=False)
                 logger.info(f"Успішно відкрито у плеєрі: {target_file}")
+
+                # Змінюємо тег в macOS Finder на Жовтий (5 = Дивлюся)
+                try:
+                    set_macos_tag(target_file, "Дивлюся", 5)
+                except Exception:
+                    pass
+
+                # Фіксуємо сесію перегляду для автопереходу у "Переглянуто" після закриття плеєра
+                global CURRENT_WATCHING_SESSION
+                f_key = hashlib.md5(str(target_file).encode("utf-8")).hexdigest()[:10]
+                CURRENT_WATCHING_SESSION = {
+                    "file_key": f_key,
+                    "path": str(target_file.resolve()),
+                    "name": target_file.name,
+                    "started_at": time.time(),
+                }
+                PENDING_WATCH_UPDATES.append({
+                    "file_key": f_key,
+                    "status": "watching",
+                    "path": str(target_file.resolve()),
+                    "name": target_file.name,
+                })
                 return True
             else:
                 logger.warning(f"open_iina: файл не знайдено на Mac: {payload}")
@@ -649,7 +684,29 @@ async def run_agent_loop():
                     device_name, free_gb, uptime_str = get_mac_stats()
                     files = scan_local_anime()
 
+                    # Перевіряємо статус активної сесії перегляду
+                    global CURRENT_WATCHING_SESSION
+                    if CURRENT_WATCHING_SESSION:
+                        # Якщо плеєр закрився і з моменту запуску пройшло щонайменше 20 секунд
+                        elapsed = time.time() - CURRENT_WATCHING_SESSION.get("started_at", 0)
+                        if elapsed >= 20 and not is_media_player_running():
+                            watched_file_path = Path(CURRENT_WATCHING_SESSION["path"])
+                            logger.info(f"Плеєр закрито. Позначаємо серію як переглянуту: {CURRENT_WATCHING_SESSION['name']}")
+                            try:
+                                set_macos_tag(watched_file_path, "Переглянуто", 1)  # 1 = Сірий тег Finder
+                            except Exception:
+                                pass
+                            PENDING_WATCH_UPDATES.append({
+                                "file_key": CURRENT_WATCHING_SESSION["file_key"],
+                                "status": "watched",
+                                "path": CURRENT_WATCHING_SESSION["path"],
+                                "name": CURRENT_WATCHING_SESSION["name"],
+                            })
+                            CURRENT_WATCHING_SESSION = None
+
                     posters_payload = get_posters_base64(folders_needing_posters) if folders_needing_posters else None
+
+                    watch_updates_to_send = list(PENDING_WATCH_UPDATES)
 
                     payload = {
                         "device_name": device_name,
@@ -659,6 +716,7 @@ async def run_agent_loop():
                         "files": files,
                         "executed_command_ids": executed_ids,
                         "posters": posters_payload,
+                        "watch_updates": watch_updates_to_send,
                     }
 
                     headers = {
@@ -675,6 +733,9 @@ async def run_agent_loop():
                         if resp.status == 200:
                             data = await resp.json()
                             executed_ids.clear()
+                            for w_item in watch_updates_to_send:
+                                if w_item in PENDING_WATCH_UPDATES:
+                                    PENDING_WATCH_UPDATES.remove(w_item)
                             folders_needing_posters = data.get("missing_posters", [])
                             commands = data.get("commands", [])
                             for cmd in commands:

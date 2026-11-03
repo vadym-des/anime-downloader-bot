@@ -13,6 +13,7 @@ from mac_sync_schema import (
     update_mac_device_state,
     get_pending_mac_commands,
     mark_mac_command_done,
+    set_file_watch_status,
 )
 from config import BOT_TOKEN
 
@@ -29,6 +30,7 @@ class FileItem(BaseModel):
     name: str
     path: str
     size: int
+    status: Optional[str] = "new"
 
 
 class HeartbeatPayload(BaseModel):
@@ -39,6 +41,7 @@ class HeartbeatPayload(BaseModel):
     files: List[FileItem]
     executed_command_ids: Optional[List[int]] = None
     posters: Optional[Dict[str, str]] = None
+    watch_updates: Optional[List[Dict[str, Any]]] = None
 
 
 @api_app.get("/health")
@@ -75,6 +78,14 @@ async def mac_heartbeat(payload: HeartbeatPayload, x_sync_secret: Optional[str] 
                 (POSTERS_DIR / f"{f_hash}.jpg").write_bytes(base64.b64decode(b64_str))
             except Exception as e:
                 logger.debug(f"Помилка збереження постера для {folder_name}: {e}")
+
+    # Оновлюємо статуси перегляду (відкрив/подивився)
+    if payload.watch_updates:
+        for upd in payload.watch_updates:
+            k = upd.get("file_key")
+            st = upd.get("status")
+            if k and st:
+                set_file_watch_status(file_key=k, status=st, file_path=upd.get("path", ""), file_name=upd.get("name", ""))
 
     # Зберігаємо актуальний список файлів
     files_data = [f.model_dump() for f in payload.files]
