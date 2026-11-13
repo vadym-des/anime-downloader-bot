@@ -145,6 +145,13 @@ def queue_mac_command(action: str, payload: str = "") -> int:
     """Ставить команду для виконання на Mac (наприклад, видалити, відкрити у Finder/IINA)."""
     init_mac_sync_db()
     with sqlite3.connect(DB_PATH) as conn:
+        if action.startswith("download_"):
+            existing = conn.execute(
+                "SELECT id FROM mac_pending_commands WHERE action = ? AND payload = ? AND status = 'pending'",
+                (action, payload)
+            ).fetchone()
+            if existing:
+                return existing[0]
         cur = conn.execute("""
             INSERT INTO mac_pending_commands (action, payload, status, created_at)
             VALUES (?, ?, 'pending', ?)
@@ -170,22 +177,14 @@ def mark_mac_command_done(cmd_id: int):
 
 
 def is_episode_handled_or_downloaded(chat_id: int, title: str, ep_num: int) -> bool:
-    """Перевіряє, чи ця серія вже була завантажена, поставлена в чергу або вже є на Mac."""
+    """Перевіряє, чи ця серія вже була завантажена або стоїть у черзі для завантаження на Mac."""
     if not title or not ep_num:
         return False
     from channel_monitor import normalize_title_for_match
     t_norm = normalize_title_for_match(title)
     init_mac_sync_db()
     with sqlite3.connect(DB_PATH) as conn:
-        # 1. Перевіряємо mac_handled_episodes (за останні 24 години)
-        row = conn.execute(
-            "SELECT handled_at FROM mac_handled_episodes WHERE chat_id = ? AND title_norm = ? AND episode = ?",
-            (chat_id, t_norm, ep_num)
-        ).fetchone()
-        if row and (time.time() - row[0]) < 86400:
-            return True
-
-        # 2. Перевіряємо mac_local_files (файли, що вже лежать на Mac)
+        # 1. Перевіряємо mac_local_files (файли, що вже лежать на Mac)
         ep_pats = [
             rf"\[0?{ep_num}\s*(?:з|/|-|\])",
             rf"S\d+E0?{ep_num}\b",
@@ -197,6 +196,32 @@ def is_episode_handled_or_downloaded(chat_id: int, title: str, ep_num: int) -> b
             if (f_norm and (f_norm in t_norm or t_norm in f_norm)) or (title.lower() in folder_name.lower()):
                 if any(re.search(pat, file_name, re.IGNORECASE) for pat in ep_pats):
                     return True
+
+        # 2. Перевіряємо mac_pending_commands (активні команди в черзі для Mac, коли ноут спав)
+        pending_rows = conn.execute(
+            "SELECT payload FROM mac_pending_commands WHERE status = 'pending' AND action LIKE 'download_%' AND created_at > ?",
+            (time.time() - 86400,)
+        ).fetchall()
+        for p_row in pending_rows:
+            try:
+                p_data = json.loads(p_row[0])
+                p_title = p_data.get("title", "")
+                p_ep = p_data.get("episode")
+                if p_ep == ep_num:
+                    p_norm = normalize_title_for_match(p_title)
+                    if (p_norm and (p_norm in t_norm or t_norm in p_norm)) or (title.lower() in p_title.lower()):
+                        return True
+            except Exception:
+                pass
+
+        # 3. Короткий grace period (75 сек) для mac_handled_episodes, щоб запобігти паралельним викликам в одну секунду
+        row = conn.execute(
+            "SELECT handled_at FROM mac_handled_episodes WHERE chat_id = ? AND title_norm = ? AND episode = ?",
+            (chat_id, t_norm, ep_num)
+        ).fetchone()
+        if row and (time.time() - row[0]) < 75:
+            return True
+
     return False
 
 

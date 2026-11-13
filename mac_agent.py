@@ -467,14 +467,43 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                     set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
                     set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
                 except Exception as e_dl:
-                    logger.error(f"Помилка FEX завантаження на Mac: {e_dl}")
-                    await edit_tg_status(
-                        bot_token,
-                        chat_id,
-                        msg_id,
-                        f"❌ <b>Помилка завантаження на Mac:</b>\n<code>{html.escape(str(e_dl))}</code>",
-                    )
-                    return True
+                    logger.warning(f"Обрив завантаження FEX на Mac (сон або мережа): {e_dl}")
+                    share_key = data.get("share_key")
+                    refreshed = False
+                    if share_key:
+                        try:
+                            logger.info(f"Спроба оновити посилання FEX через share_key {share_key}...")
+                            fresh_files = await FexDownloader.get_files_in_share(share_key)
+                            for ff in fresh_files:
+                                if ff.get("name") == f_name or (ep_num and f"[{ep_num:02d}" in ff.get("name", "")):
+                                    fresh_url = ff.get("download_url")
+                                    fresh_tok = ff.get("token")
+                                    if fresh_url:
+                                        await FexDownloader.download_file(fresh_url, dest_file, token=fresh_tok, progress_callback=on_mac_progress)
+                                        set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
+                                        set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
+                                        refreshed = True
+                                        break
+                        except Exception as e_refresh:
+                            logger.warning(f"Не вдалося відновити через share_key: {e_refresh}")
+
+                    if not refreshed:
+                        if msg_id:
+                            try:
+                                await edit_tg_status(
+                                    bot_token,
+                                    chat_id,
+                                    msg_id,
+                                    (
+                                        f"⏸ <b>Завантаження призупинено (сон Mac / очікування мережі)...</b>\n\n"
+                                        f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
+                                        f"📄 <code>{f_name}</code>\n\n"
+                                        f"⚡️ <i>Завантаження автоматично відновиться з місця зупинки після підключення до мережі!</i>"
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                        return False
 
             if not poster_path.exists():
                 try:
@@ -598,14 +627,23 @@ async def execute_command(cmd: Dict[str, Any]) -> bool:
                     set_macos_tag(dest_file, TAG_NAME, TAG_COLOR)
                     set_macos_tag(target_folder, TAG_NAME, TAG_COLOR)
                 except Exception as e_tg_dl:
-                    logger.error(f"Помилка MTProto завантаження на Mac: {e_tg_dl}")
-                    await edit_tg_status(
-                        bot_token,
-                        chat_id,
-                        msg_id,
-                        f"❌ <b>Помилка завантаження з Telegram на Mac:</b>\n<code>{html.escape(str(e_tg_dl))}</code>",
-                    )
-                    return True
+                    logger.warning(f"Обрив завантаження Telegram на Mac (сон або мережа): {e_tg_dl}")
+                    if msg_id:
+                        try:
+                            await edit_tg_status(
+                                bot_token,
+                                chat_id,
+                                msg_id,
+                                (
+                                    f"⏸ <b>Завантаження з Telegram призупинено (сон Mac / очікування мережі)...</b>\n\n"
+                                    f"🎬 <b>Аніме:</b> {title} [Серія {ep_num}]\n"
+                                    f"📄 <code>{f_name}</code>\n\n"
+                                    f"⚡️ <i>Завантаження автоматично відновиться після пробудження ноута!</i>"
+                                ),
+                            )
+                        except Exception:
+                            pass
+                    return False
 
             if not poster_path.exists():
                 try:

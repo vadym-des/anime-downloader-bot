@@ -25,53 +25,67 @@ class FexDownloader:
 
     @staticmethod
     async def get_anonymous_token(session: aiohttp.ClientSession) -> Optional[str]:
-        """Отримує анонімний токен доступу від FEX.NET."""
+        """Отримує анонімний токен доступу від FEX.NET з авто-повторами при збої мережі."""
         url = "https://api.fex.net/api/v1/config/anonymous"
         headers = {"User-Agent": USER_AGENT}
-        try:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    anon_data = data.get("anonymous") or {}
-                    token = anon_data.get("anonym_token") or data.get("anonym_token")
-                    return token
-        except Exception as e:
-            logger.error(f"Помилка отримання токена FEX: {e}")
+        for attempt in range(1, 4):
+            try:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        anon_data = data.get("anonymous") or {}
+                        token = anon_data.get("anonym_token") or data.get("anonym_token")
+                        if token:
+                            return token
+            except Exception as e:
+                logger.warning(f"Спроба {attempt}/3 отримання токена FEX: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(1.5 * attempt)
         return None
 
     @classmethod
     async def get_files_in_share(cls, share_key: str) -> List[Dict]:
         """
-        Рекурсивно повертає список усіх файлів у публічній папці FEX.NET.
+        Рекурсивно повертає список усіх файлів у публічній папці FEX.NET із авто-повторами.
         """
         connector = aiohttp.TCPConnector(limit=10, enable_cleanup_closed=True)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            token = await cls.get_anonymous_token(session)
-            if not token:
-                logger.error("Не вдалося отримати анонімний токен FEX.NET")
-                return []
-
-            headers = {
-                "User-Agent": USER_AGENT,
-                "Authorization": f"Bearer {token}",
-            }
-
-            url = f"https://api.fex.net/api/v1/file/share/{share_key}"
+        for attempt in range(1, 4):
             try:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        logger.error(f"FEX повернув статус {resp.status} для ключа {share_key}")
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    token = await cls.get_anonymous_token(session)
+                    if not token:
+                        logger.warning(f"Спроба {attempt}/3: не вдалося отримати токен FEX")
+                        if attempt < 3:
+                            await asyncio.sleep(2)
+                            continue
                         return []
-                    data = await resp.json()
-            except Exception as e:
-                logger.error(f"Помилка запиту до кореня FEX: {e}")
-                return []
 
-            files: List[Dict] = []
-            tree = data.get("tree") or {}
-            base_share_key = share_key.split("/")[0]
-            await cls._crawl_tree(session, headers, base_share_key, tree, files, token)
-            return files
+                    headers = {
+                        "User-Agent": USER_AGENT,
+                        "Authorization": f"Bearer {token}",
+                    }
+
+                    url = f"https://api.fex.net/api/v1/file/share/{share_key}"
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"FEX повернув статус {resp.status} для ключа {share_key}")
+                            if attempt < 3:
+                                await asyncio.sleep(2)
+                                continue
+                            return []
+                        data = await resp.json()
+
+                    files: List[Dict] = []
+                    tree = data.get("tree") or {}
+                    base_share_key = share_key.split("/")[0]
+                    await cls._crawl_tree(session, headers, base_share_key, tree, files, token)
+                    if files:
+                        return files
+            except Exception as e:
+                logger.warning(f"Спроба {attempt}/3 помилка запиту до FEX ({share_key}): {e}")
+                if attempt < 3:
+                    await asyncio.sleep(2)
+        return []
 
     @classmethod
     async def _crawl_tree(
@@ -223,9 +237,6 @@ class FexDownloader:
                     pass
             raise e
         except Exception as e:
-            if part_path.exists():
-                try:
-                    part_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            # Зберігаємо .part файл для відновлення та докачування при пробудженні Mac або відновленні мережі
+            logger.info(f"Збережено тимчасовий файл {part_path.name} для подальшого докачування.")
             raise e

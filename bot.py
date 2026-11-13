@@ -4528,11 +4528,15 @@ async def channel_monitoring_loop(bot: Bot):
                         mark_post_seen(ch, pid)
                         continue
 
+                    mac_state = get_mac_device_state()
+                    mac_online = mac_state.get("is_online", False) if mac_state else (platform.system() == "Darwin")
+                    status_note = "🚀 <b>Починаю автоматичне завантаження на ваш Mac...</b>" if mac_online else "💤 <b>Mac зараз у режимі сну (офлайн).</b>\n⚡️ <i>Завдання поставлено в чергу — завантажиться автоматично, щойно ви відкриєте ноутбук!</i>"
+
                     header_notify = (
                         f"🔔 <b>Вийшла нова серія:</b> <code>{display_title}</code>{ep_text}{type_text}!\n"
                         f"📡 <i>Канал:</i> @{ch}\n"
                         f"⚡️ <i>Орієнтовний час завантаження:</i> ~{eta}\n\n"
-                        "🚀 <b>Починаю автоматичне завантаження на ваш Mac...</b>"
+                        f"{status_note}"
                     )
 
                     notify_msg = await bot.send_message(
@@ -4540,8 +4544,6 @@ async def channel_monitoring_loop(bot: Bot):
                         text=header_notify,
                         disable_notification=quiet
                     )
-                    if ep_n:
-                        mark_episode_handled(user_chat, display_title, ep_n)
 
                     share_key = FexDownloader.extract_share_key(fex_link) if fex_link else None
                     if not share_key:
@@ -4572,7 +4574,6 @@ async def channel_monitoring_loop(bot: Bot):
                             dest = t_folder / f_name
                             dl_url = target_file.get("download_url")
                             tok = target_file.get("token")
-                            mark_fex_seen(user_chat, share_key, all_share_names)
                             if dl_url:
                                 ep_detected = post.get("ep_num")
                                 if not ep_detected:
@@ -4582,6 +4583,7 @@ async def channel_monitoring_loop(bot: Bot):
                                     cmd_payload = json.dumps({
                                         "url": dl_url,
                                         "token": tok,
+                                        "share_key": share_key,
                                         "title": display_title,
                                         "episode": ep_detected,
                                         "folder": t_folder.name,
@@ -4592,6 +4594,9 @@ async def channel_monitoring_loop(bot: Bot):
                                         "dub_sub": detect_tracks_label(dest.name, display_title, user_chat)
                                     })
                                     queue_mac_command("download_fex", cmd_payload)
+                                    if ep_detected:
+                                        mark_episode_handled(user_chat, display_title, ep_detected, dest.name)
+                                    mark_post_seen(ch, pid)
                                     continue
 
                                 tracker = DownloadProgressTracker(interval_seconds=2.5)
@@ -4612,6 +4617,10 @@ async def channel_monitoring_loop(bot: Bot):
                                 set_macos_tag(t_folder, TAG_NAME, TAG_COLOR)
                                 f_key = register_file(dest)
 
+                                if ep_detected:
+                                    mark_episode_handled(user_chat, display_title, ep_detected, dest.name)
+                                mark_post_seen(ch, pid)
+
                                 if quiet:
                                     add_to_digest_queue(user_chat, display_title, ep_detected, str(dest))
                                     try:
@@ -4627,6 +4636,17 @@ async def channel_monitoring_loop(bot: Bot):
                                         display_title,
                                         prefix_text=f"🎉 <b>Авто-завантаження завершено! {display_title}{ep_text} на ноуті!</b>"
                                     )
+                        else:
+                            # Файли на FEX ще не з'явилися або сталась тимчасова помилка API: оновлюємо повідомлення й не позначаємо як оброблене
+                            try:
+                                await notify_msg.edit_text(
+                                    f"🔔 <b>Вийшла нова серія:</b> <code>{display_title}</code>{ep_text}{type_text}!\n"
+                                    f"📡 <i>Канал:</i> @{ch}\n\n"
+                                    "⏳ <b>Очікую появу роздачі на FEX.NET...</b>\n"
+                                    "⚡️ <i>Файл завантажується на сервер роздачі. Бот автоматично перевірить роздачу та скачає на Mac щойно вона з'явиться!</i>"
+                                )
+                            except Exception:
+                                pass
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -4656,22 +4676,25 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
     dub_sub = detect_tracks_label(f_name, title, chat_id)
     quality = "4K Ultra HD" if ("2160p" in f_name or "4k" in f_name.lower()) else "1080p Full HD"
 
+    mac_state = get_mac_device_state()
+    mac_online = mac_state.get("is_online", False) if mac_state else (platform.system() == "Darwin")
+    status_suffix = "🚀 <b>Починаю автоматичне завантаження на ваш Mac...</b>" if mac_online else "💤 <b>Mac зараз у режимі сну (офлайн).</b>\n⚡️ <i>Завдання поставлено в чергу — завантажиться автоматично, щойно ви відкриєте ноутбук!</i>"
+
     cancel_id = f"auto_{uuid.uuid4().hex[:8]}"
     notify_msg = await bot.send_message(
         chat_id,
         f"🔔 <b>Вийшла нова серія:</b> <code>{title}</code> [Серія {episode}]\n"
         f"🎞 <b>Якість:</b> {quality} • 🔊 <b>Доріжки:</b> {dub_sub}\n\n"
-        "🚀 <b>Починаю автоматичне завантаження на ваш Mac...</b>",
+        f"{status_suffix}",
         reply_markup=build_cancel_keyboard(cancel_id) if platform.system() == "Darwin" else None,
         disable_notification=quiet,
     )
-
-    mark_episode_handled(chat_id, title, episode, f_name)
 
     if platform.system() != "Darwin":
         cmd_payload = json.dumps({
             "url": dl_url,
             "token": tok,
+            "share_key": target_file.get("share_key"),
             "title": title,
             "episode": episode,
             "folder": clean_t,
@@ -4682,6 +4705,7 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
             "dub_sub": dub_sub
         })
         queue_mac_command("download_fex", cmd_payload)
+        mark_episode_handled(chat_id, title, episode, f_name)
         return True
     tracker = DownloadProgressTracker(interval_seconds=2.5)
 
@@ -4741,7 +4765,7 @@ async def auto_download_fex_episode(bot: Bot, chat_id: int, title: str, episode:
 
 
 async def fex_share_watch_pass(bot: Bot):
-    """Один прохід: для кожної підписки з fex_url шукає НОВІ серії в роздачі та качає їх."""
+    """Один прохід: для кожної підписки з fex_url шукає НОВІ серії в роздачі та качає їх + Reconciler пропущених серій."""
     for s in get_subscriptions():
         fex_url = s.get("fex_url")
         share_key = FexDownloader.extract_share_key(fex_url) if fex_url else None
@@ -4759,9 +4783,36 @@ async def fex_share_watch_pass(bot: Bot):
                 logger.info(f"FEX baseline «{s['title']}»: {len(files)} файлів")
                 continue
             for item in pick_new_fex_episodes(files, seen, s.get("pref_type", "any")):
-                ok = await auto_download_fex_episode(bot, chat_id, s["title"], item["episode"], item["file"])
+                target_f = item["file"]
+                target_f["share_key"] = share_key
+                ok = await auto_download_fex_episode(bot, chat_id, s["title"], item["episode"], target_f)
                 if ok:
                     mark_fex_seen(chat_id, share_key, item["all_names"])
+
+            # RECONCILER (Self-Healing для сну та збоїв мережі):
+            # Перевіряємо, чи останні 2 серії роздачі справді є на Mac або в черзі
+            ep_re = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
+            by_ep: Dict[int, List[Dict[str, Any]]] = {}
+            for f in files:
+                m = ep_re.search(f.get("name", ""))
+                if m:
+                    by_ep.setdefault(int(m.group(1)), []).append(f)
+
+            for ep_num, ep_files in sorted(by_ep.items(), reverse=True)[:2]:
+                if not is_episode_handled_or_downloaded(chat_id, s["title"], ep_num):
+                    logger.info(f"Reconciler: знайдено пропущену серію «{s['title']}» [Серія {ep_num}]. Запуск завантаження...")
+                    pool = ep_files
+                    pref = s.get("pref_type", "any")
+                    if pref == "dub":
+                        pool = [f for f in ep_files if any(w in f.get("name", "") for w in ("MVO", "Озвуч", "DUB"))] or ep_files
+                    elif pref == "sub":
+                        pool = [f for f in ep_files if any(w in f.get("name", "") for w in ("SUB", "Саб"))] or ep_files
+                    p4k = [f for f in pool if any(q in f.get("name", "").lower() for q in ("2160p", "4k"))]
+                    p1080 = [f for f in pool if "1080p" in f.get("name", "").lower()]
+                    best_f = p4k[0] if p4k else (p1080[0] if p1080 else pool[0])
+                    best_f["share_key"] = share_key
+                    await auto_download_fex_episode(bot, chat_id, s["title"], ep_num, best_f)
+
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -4769,17 +4820,17 @@ async def fex_share_watch_pass(bot: Bot):
 
 
 async def fex_share_watch_loop(bot: Bot):
-    """Фоновий цикл (кожні 5 хв): відстеження нових серій у FEX-роздачах підписок."""
-    await asyncio.sleep(20)
+    """Фоновий цикл (кожні 60 сек): відстеження та відновлення серій у FEX-роздачах підписок."""
+    await asyncio.sleep(15)
     while True:
         try:
             await fex_share_watch_pass(bot)
-            await asyncio.sleep(300)
+            await asyncio.sleep(60)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.debug(f"Помилка fex_share_watch_loop: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
 
 async def main():
