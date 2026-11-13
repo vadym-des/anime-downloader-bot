@@ -2730,7 +2730,10 @@ async def cb_title_screen(callback: CallbackQuery):
         return
 
     video_files = [f for f in folder_path.iterdir() if f.is_file() and f.suffix.lower() in (".mkv", ".mp4", ".webm", ".avi") and not f.name.endswith(".part")]
-    video_files.sort(key=lambda x: x.name)
+    def _ep_sort_key(f):
+        ep = extract_episode_number_from_filename(f.name)
+        return (ep if ep is not None else 9999, f.name)
+    video_files.sort(key=_ep_sort_key)
 
     if not video_files:
         cleanup_empty_folder(folder_path)
@@ -2756,19 +2759,38 @@ async def cb_title_screen(callback: CallbackQuery):
     ]
 
     keyboard_rows = []
+    statuses = get_all_watch_statuses()
     for idx, vf in enumerate(video_files, 1):
         file_key = register_file(vf)
-        raw_ep = vf.stem
-        ep_name = format_anime_display_name(raw_ep, max_len=45)
-        ep_btn_name = format_anime_display_name(raw_ep, max_len=28)
+        ep = extract_episode_number_from_filename(vf.name)
+
+        st = statuses.get(file_key, "new")
         is_active = is_file_currently_playing(file_key)
-        icon = "👀 " if is_active else ""
-        badge = " 👀 <i>(зараз у плеєрі)</i>" if is_active else ""
-        lines.append(f"<b>{idx}.</b> {ep_name}{badge}")
+        if is_active:
+            st = "watching"
+
+        icon = "👀 " if is_active else ("🟢 " if st == "new" else "⚪️ ")
+        badge = " 👀 <i>(зараз у плеєрі)</i>" if is_active else (" ⚪️ <i>(переглянуто)</i>" if st == "watched" else "")
+
+        quality = "4K" if ("2160p" in vf.name or "4k" in vf.name.lower()) else ("1080p" if "1080p" in vf.name else "")
+        q_label = f" • {quality}" if quality else ""
+
+        if ep is not None:
+            num_str = f"{ep}."
+            label_text = f"Серія {ep}{q_label}"
+            btn_text = f"{ep}. {icon}Серія {ep}{q_label}"
+        else:
+            num_str = f"{idx}."
+            raw_ep = vf.stem
+            cleaned = format_anime_display_name(raw_ep, max_len=30)
+            label_text = cleaned
+            btn_text = f"{idx}. {icon}{cleaned}"
+
+        lines.append(f"<b>{num_str}</b> {icon}{html.escape(label_text)}{badge}")
 
         keyboard_rows.append([
             InlineKeyboardButton(
-                text=left_align_button_text(f"{idx}. {icon}{ep_btn_name}"),
+                text=left_align_button_text(btn_text),
                 callback_data=f"item:{file_key}"
             )
         ])
