@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import aiohttp
 from mac_sync_schema import (
     init_mac_sync_db,
+    cancel_pending_download_commands,
     get_mac_device_state,
     get_synced_mac_files,
     queue_mac_command,
@@ -2869,10 +2870,15 @@ async def cb_del_title_confirm(callback: CallbackQuery):
 
     clean_title = format_anime_display_name(folder_path.name, max_len=50)
     total_size = sum(f.stat().st_size for f in folder_path.glob("*.*") if f.is_file())
-    if hasattr(folder_path, "_files") or platform.system() != "Darwin":
-        for f in folder_path.glob("*.*"):
-            queue_mac_command("delete_file", str(f))
-    else:
+    ep_re_del = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
+    for f in folder_path.glob("*.*"):
+        if f.is_file():
+            m_ep = ep_re_del.search(f.name)
+            if m_ep:
+                mark_episode_handled(callback.from_user.id, folder_path.name, int(m_ep.group(1)), f.name)
+            if hasattr(folder_path, "_files") or platform.system() != "Darwin":
+                queue_mac_command("delete_file", str(f))
+    if not (hasattr(folder_path, "_files") or platform.system() != "Darwin"):
         shutil.rmtree(folder_path, ignore_errors=True)
     TITLE_REGISTRY.pop(t_key, None)
 
@@ -3294,6 +3300,13 @@ async def cb_delete_confirm(callback: CallbackQuery):
         file_size = file_path.stat().st_size
         size_str = format_bytes(file_size)
         p_str = str(file_path.resolve() if hasattr(file_path, "resolve") else file_path)
+
+        # Фіксуємо видалену серію як оброблену/переглянуту в постійну історію, щоб ніколи повторно не качати її
+        ep_re_single = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
+        m_single = ep_re_single.search(file_path.name)
+        if m_single:
+            parent_title = file_path.parent.name if hasattr(file_path, "parent") else ""
+            mark_episode_handled(callback.from_user.id, parent_title, int(m_single.group(1)), file_path.name)
 
         # Якщо ми на сервері — ставимо команду на видалення Mac-агенту
         if not Path(p_str).exists():
@@ -4777,44 +4790,30 @@ async def fex_share_watch_pass(bot: Bot):
             if not files:
                 continue
             seen = get_fex_seen(chat_id, share_key)
-            if seen is None:
-                # Baseline: перше сканування — запам'ятовуємо наявне, щоб не качати всі старі серії з нуля
-                mark_fex_seen(chat_id, share_key, [f.get("name", "") for f in files])
-                logger.info(f"FEX baseline «{s['title']}»: {len(files)} файлів")
-            else:
-                for item in pick_new_fex_episodes(files, seen, s.get("pref_type", "any")):
-                    target_f = item["file"]
-                    target_f["share_key"] = share_key
-                    ok = await auto_download_fex_episode(bot, chat_id, s["title"], item["episode"], target_f)
-                    if ok:
-                        mark_fex_seen(chat_id, share_key, item["all_names"])
-
-            # RECONCILER (Self-Healing для сну та збоїв мережі):
-            # Перевіряємо, чи найновіша серія роздачі справді є на Mac або в черзі
             ep_re = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
-            by_ep: Dict[int, List[Dict[str, Any]]] = {}
-            for f in files:
-                m = ep_re.search(f.get("name", ""))
-                if m:
-                    by_ep.setdefault(int(m.group(1)), []).append(f)
+            if seen is None:
+                # Baseline: перше сканування — запам'ятовуємо наявне, щоб не качати старі серії
+                all_names = [f.get("name", "") for f in files]
+                mark_fex_seen(chat_id, share_key, all_names)
+                # ЗАПОБІЖНИК: одразу фіксуємо всі існуючі серії як оброблені, щоб ніколи їх повторно не качати автоматично
+                for f in files:
+                    m = ep_re.search(f.get("name", ""))
+                    if m:
+                        mark_episode_handled(chat_id, s["title"], int(m.group(1)), f.get("name", ""))
+                logger.info(f"FEX baseline «{s['title']}»: {len(files)} файлів зафіксовано як бачені")
+                continue
 
-            if by_ep:
-                # Перевіряємо найновішу серію тайтлу
-                latest_ep = max(by_ep.keys())
-                ep_files = by_ep[latest_ep]
-                if not is_episode_handled_or_downloaded(chat_id, s["title"], latest_ep):
-                    logger.info(f"Reconciler: знайдено пропущену серію «{s['title']}» [Серія {latest_ep}]. Запуск завантаження...")
-                    pool = ep_files
-                    pref = s.get("pref_type", "any")
-                    if pref == "dub":
-                        pool = [f for f in ep_files if any(w in f.get("name", "") for w in ("MVO", "Озвуч", "DUB"))] or ep_files
-                    elif pref == "sub":
-                        pool = [f for f in ep_files if any(w in f.get("name", "") for w in ("SUB", "Саб"))] or ep_files
-                    p4k = [f for f in pool if any(q in f.get("name", "").lower() for q in ("2160p", "4k"))]
-                    p1080 = [f for f in pool if "1080p" in f.get("name", "").lower()]
-                    best_f = p4k[0] if p4k else (p1080[0] if p1080 else pool[0])
-                    best_f["share_key"] = share_key
-                    await auto_download_fex_episode(bot, chat_id, s["title"], latest_ep, best_f)
+            for item in pick_new_fex_episodes(files, seen, s.get("pref_type", "any")):
+                target_f = item["file"]
+                target_f["share_key"] = share_key
+                # Додатковий запобіжник: перевіряємо чи серію вже бачили/качали
+                if is_episode_handled_or_downloaded(chat_id, s["title"], item["episode"]):
+                    mark_fex_seen(chat_id, share_key, item["all_names"])
+                    continue
+                ok = await auto_download_fex_episode(bot, chat_id, s["title"], item["episode"], target_f)
+                if ok:
+                    mark_fex_seen(chat_id, share_key, item["all_names"])
+                    mark_episode_handled(chat_id, s["title"], item["episode"], target_f.get("name", ""))
 
         except asyncio.CancelledError:
             raise
@@ -4823,17 +4822,41 @@ async def fex_share_watch_pass(bot: Bot):
 
 
 async def fex_share_watch_loop(bot: Bot):
-    """Фоновий цикл (кожні 60 сек): відстеження та відновлення серій у FEX-роздачах підписок."""
-    await asyncio.sleep(15)
+    """Фоновий цикл (кожні 5 хв): відстеження нових серій у FEX-роздачах підписок."""
+    await asyncio.sleep(20)
     while True:
         try:
             await fex_share_watch_pass(bot)
-            await asyncio.sleep(60)
+            await asyncio.sleep(300)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.debug(f"Помилка fex_share_watch_loop: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
+
+
+async def backfill_fex_subscriptions_baseline():
+    """Фіксує всі поточні серії в підписках як вже бачені/оброблені, щоб нічого старого не качалося."""
+    try:
+        ep_re = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
+        for s in get_subscriptions():
+            fex_url = s.get("fex_url")
+            share_key = FexDownloader.extract_share_key(fex_url) if fex_url else None
+            if not share_key:
+                continue
+            chat_id = s.get("chat_id", 453079694)
+            files = await FexDownloader.get_files_in_share(share_key)
+            if not files:
+                continue
+            all_names = [f.get("name", "") for f in files]
+            mark_fex_seen(chat_id, share_key, all_names)
+            for f in files:
+                m = ep_re.search(f.get("name", ""))
+                if m:
+                    mark_episode_handled(chat_id, s["title"], int(m.group(1)), f.get("name", ""))
+            logger.info(f"Захисний бейзлайн «{s['title']}»: зафіксовано {len(files)} файлів як бачені")
+    except Exception as e:
+        logger.debug(f"backfill_fex_subscriptions_baseline error: {e}")
 
 
 async def main():
@@ -4849,6 +4872,12 @@ async def main():
     init_channel_monitor_db()
     init_update_db()
     init_mac_sync_db()
+    try:
+        cancelled_cnt = cancel_pending_download_commands()
+        if cancelled_cnt:
+            logger.info(f"Скасовано {cancelled_cnt} старих команд завантаження з черги.")
+    except Exception as e_clear:
+        logger.debug(f"Помилка cancel_pending_download_commands: {e_clear}")
 
     # Синхронізуємо стартові підписки та їхні налаштування (DUB vs SUB)
     for uid in (set(ALLOWED_USERS) | {453079694}):
@@ -4888,6 +4917,7 @@ async def main():
         logger.debug(f"Помилка звіту про ручний рестарт: {e_rest}")
 
     # Запускаємо фонові монітори
+    asyncio.create_task(backfill_fex_subscriptions_baseline())
     asyncio.create_task(mac_sleep_watchdog(bot))
     asyncio.create_task(channel_monitoring_loop(bot))
     asyncio.create_task(fex_share_watch_loop(bot))

@@ -59,6 +59,13 @@ async def debug_mac(x_sync_secret: Optional[str] = Header(None)):
     return {"state": st, "files_count": sum(len(v) for v in fl.values()), "folders": list(fl.keys())}
 
 
+@api_app.post("/api/mac/commands/clear")
+async def clear_mac_commands():
+    from mac_sync_schema import cancel_pending_download_commands
+    count = cancel_pending_download_commands()
+    return {"status": "cleared", "cancelled_commands": count}
+
+
 @api_app.post("/api/mac/heartbeat")
 async def mac_heartbeat(payload: HeartbeatPayload, x_sync_secret: Optional[str] = Header(None)):
     if x_sync_secret != SYNC_SECRET:
