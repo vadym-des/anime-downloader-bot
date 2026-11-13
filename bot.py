@@ -4778,19 +4778,19 @@ async def fex_share_watch_pass(bot: Bot):
                 continue
             seen = get_fex_seen(chat_id, share_key)
             if seen is None:
-                # Baseline: перше сканування — запам'ятовуємо наявне, нічого не качаємо
+                # Baseline: перше сканування — запам'ятовуємо наявне, щоб не качати всі старі серії з нуля
                 mark_fex_seen(chat_id, share_key, [f.get("name", "") for f in files])
                 logger.info(f"FEX baseline «{s['title']}»: {len(files)} файлів")
-                continue
-            for item in pick_new_fex_episodes(files, seen, s.get("pref_type", "any")):
-                target_f = item["file"]
-                target_f["share_key"] = share_key
-                ok = await auto_download_fex_episode(bot, chat_id, s["title"], item["episode"], target_f)
-                if ok:
-                    mark_fex_seen(chat_id, share_key, item["all_names"])
+            else:
+                for item in pick_new_fex_episodes(files, seen, s.get("pref_type", "any")):
+                    target_f = item["file"]
+                    target_f["share_key"] = share_key
+                    ok = await auto_download_fex_episode(bot, chat_id, s["title"], item["episode"], target_f)
+                    if ok:
+                        mark_fex_seen(chat_id, share_key, item["all_names"])
 
             # RECONCILER (Self-Healing для сну та збоїв мережі):
-            # Перевіряємо, чи останні 2 серії роздачі справді є на Mac або в черзі
+            # Перевіряємо, чи найновіша серія роздачі справді є на Mac або в черзі
             ep_re = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
             by_ep: Dict[int, List[Dict[str, Any]]] = {}
             for f in files:
@@ -4798,9 +4798,12 @@ async def fex_share_watch_pass(bot: Bot):
                 if m:
                     by_ep.setdefault(int(m.group(1)), []).append(f)
 
-            for ep_num, ep_files in sorted(by_ep.items(), reverse=True)[:2]:
-                if not is_episode_handled_or_downloaded(chat_id, s["title"], ep_num):
-                    logger.info(f"Reconciler: знайдено пропущену серію «{s['title']}» [Серія {ep_num}]. Запуск завантаження...")
+            if by_ep:
+                # Перевіряємо найновішу серію тайтлу
+                latest_ep = max(by_ep.keys())
+                ep_files = by_ep[latest_ep]
+                if not is_episode_handled_or_downloaded(chat_id, s["title"], latest_ep):
+                    logger.info(f"Reconciler: знайдено пропущену серію «{s['title']}» [Серія {latest_ep}]. Запуск завантаження...")
                     pool = ep_files
                     pref = s.get("pref_type", "any")
                     if pref == "dub":
@@ -4811,7 +4814,7 @@ async def fex_share_watch_pass(bot: Bot):
                     p1080 = [f for f in pool if "1080p" in f.get("name", "").lower()]
                     best_f = p4k[0] if p4k else (p1080[0] if p1080 else pool[0])
                     best_f["share_key"] = share_key
-                    await auto_download_fex_episode(bot, chat_id, s["title"], ep_num, best_f)
+                    await auto_download_fex_episode(bot, chat_id, s["title"], latest_ep, best_f)
 
         except asyncio.CancelledError:
             raise
