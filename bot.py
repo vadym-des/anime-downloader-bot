@@ -3389,9 +3389,41 @@ async def cb_delete_confirm(callback: CallbackQuery):
             parent_title = file_path.parent.name if hasattr(file_path, "parent") else ""
             mark_episode_handled(callback.from_user.id, parent_title, int(m_single.group(1)), file_path.name)
 
+        parent_dir = file_path.parent if hasattr(file_path, "parent") else None
+        next_file = None
+        title_back_key = None
+
+        if parent_dir and parent_dir.exists() and str(parent_dir) != str(DOWNLOADS_DIR):
+            try:
+                siblings = [
+                    f for f in parent_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in (".mkv", ".mp4", ".webm", ".avi") and not f.name.endswith(".part")
+                ]
+                def _ep_sort_key(f):
+                    ep = extract_episode_number_from_filename(f.name)
+                    return (ep if ep is not None else 9999, f.name)
+                siblings.sort(key=_ep_sort_key)
+
+                curr_idx = -1
+                for i, s_f in enumerate(siblings):
+                    if s_f.name == file_path.name:
+                        curr_idx = i
+                        break
+
+                if curr_idx != -1 and curr_idx + 1 < len(siblings):
+                    next_file = siblings[curr_idx + 1]
+
+                remaining_files = [f for f in siblings if f.name != file_path.name]
+                if remaining_files:
+                    title_back_key = register_title_folder(parent_dir)
+            except Exception as e:
+                logger.error(f"Помилка пошуку наступної серії при видаленні: {e}")
+
         # Якщо ми на сервері — ставимо команду на видалення Mac-агенту
         if not Path(p_str).exists():
             queue_mac_command("delete_file", p_str)
+            if hasattr(parent_dir, "_files"):
+                parent_dir._files = [f for f in parent_dir._files if f.name != file_path.name]
         else:
             delete_video_file_and_associated(file_path)
             clean_orphan_anime_folders()
@@ -3400,17 +3432,36 @@ async def cb_delete_confirm(callback: CallbackQuery):
         mac_state = get_mac_device_state()
         free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
 
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📂 До списку аніме", callback_data="refresh_list")]
-            ]
-        )
+        buttons = []
+        if next_file:
+            next_ep = extract_episode_number_from_filename(next_file.name)
+            next_key = register_file(next_file)
+            next_label = f"🎬 Дивитися далі: Серія {next_ep} ⏭" if next_ep is not None else "🎬 Перейти до наступної серії ⏭"
+            buttons.append([
+                InlineKeyboardButton(text=next_label, callback_data=f"item:{next_key}")
+            ])
+
+        nav_row = []
+        if title_back_key:
+            nav_row.append(InlineKeyboardButton(text="⬅️ До серій тайтлу", callback_data=f"title:{title_back_key}"))
+            nav_row.append(InlineKeyboardButton(text="📂 До всіх аніме", callback_data="refresh_list"))
+        else:
+            nav_row.append(InlineKeyboardButton(text="📂 До списку аніме", callback_data="refresh_list"))
+        buttons.append(nav_row)
+
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+        next_hint = ""
+        if next_file:
+            n_ep = extract_episode_number_from_filename(next_file.name)
+            next_hint = f"\n\n💡 <i>На черзі на Mac:</i> <b>Серія {n_ep}</b>" if n_ep is not None else f"\n\n💡 <i>На черзі на Mac:</i> <b>{html.escape(next_file.name)}</b>"
 
         done_text = (
             f"🗑 <b>Файл успішно видалено з ноута!</b>\n\n"
-            f"📄 <s>{file_path.name}</s>\n"
+            f"📄 <s>{html.escape(file_path.name)}</s>\n"
             f"✨ <b>Звільнено:</b> {size_str}\n"
             f"💾 <b>Вільно на диску Mac:</b> <code>{free_gb:.1f} ГБ</code>"
+            f"{next_hint}"
         )
 
         if callback.message.photo:
