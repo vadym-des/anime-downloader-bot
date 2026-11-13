@@ -2325,7 +2325,7 @@ def extract_episode_number_from_filename(filename: str) -> Optional[int]:
 
 
 def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: int) -> str:
-    """Формує розділений список серій: окремо черга до перегляду (нові) та окремо вже переглянуті."""
+    """Формує згрупований список тайтлів з переліком доступних серій (синхронізовано з кнопками)."""
     mac_state = get_mac_device_state()
     free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
     total_episodes = sum(len(files) for files in grouped_anime.values())
@@ -2333,35 +2333,38 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: 
 
     statuses = get_all_watch_statuses()
 
-    unwatched_items = []
-    watched_items = []
+    unwatched_titles = []
+    watched_titles = []
 
     for title, files in grouped_anime.items():
         clean_title = format_anime_display_name(title, max_len=50)
 
+        ep_numbers = []
         for f in files:
-            f_key = register_file(f)
-            st = statuses.get(f_key, "new")
-            is_active = is_file_currently_playing(f_key)
-            if is_active:
-                st = "watching"
-
             ep = extract_episode_number_from_filename(f.name) or extract_episode_number_from_filename(title)
-            ep_str = f" [Серія {ep}]" if ep else ""
-            c_size = format_compact_size(f.stat().st_size)
+            if ep and ep not in ep_numbers:
+                ep_numbers.append(ep)
+        ep_numbers.sort()
 
-            item_info = {
-                "title": clean_title,
-                "ep_str": ep_str,
-                "size": c_size,
-                "key": f_key,
-                "status": st,
-            }
+        if ep_numbers:
+            ep_str = f" (Еп. {', '.join(str(e) for e in ep_numbers)})"
+        else:
+            ep_str = f" ({len(files)} сер.)"
 
-            if st == "watched":
-                watched_items.append(item_info)
-            else:
-                unwatched_items.append(item_info)
+        any_unwatched = any(statuses.get(register_file(f), "new") != "watched" for f in files)
+        has_active = any(is_file_currently_playing(register_file(f)) for f in files)
+        badge = " 👀 <i>(зараз у плеєрі)</i>" if has_active else ""
+
+        item_info = {
+            "title": clean_title,
+            "ep_str": ep_str,
+            "badge": badge,
+        }
+
+        if any_unwatched:
+            unwatched_titles.append(item_info)
+        else:
+            watched_titles.append(item_info)
 
     lines = [
         "🍿 <b>Твої аніме на Mac</b>\n",
@@ -2369,26 +2372,28 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: 
         f"📦 <b>Разом:</b> <code>{format_bytes(total_size)}</code>  •  💾 <b>Вільно:</b> <code>{free_gb:.1f} ГБ</code>\n",
     ]
 
+    idx = 1
     # Секція 1: Черга до перегляду (Нові)
-    if unwatched_items:
-        lines.append(f"🟢 <b>Черга до перегляду ({len(unwatched_items)} не бачив):</b>")
-        for idx, item in enumerate(unwatched_items, 1):
-            badge = " 👀 <i>(зараз у плеєрі)</i>" if item["status"] == "watching" else ""
+    if unwatched_titles:
+        lines.append(f"🟢 <b>Черга до перегляду ({len(unwatched_titles)} тайтлів):</b>")
+        for item in unwatched_titles:
             t_escaped = html.escape(str(item['title']))
             ep_escaped = html.escape(str(item['ep_str']))
-            lines.append(f"<b>{idx}.</b> {t_escaped}{ep_escaped}{badge}")
+            lines.append(f"<b>{idx}.</b> {t_escaped}{ep_escaped}{item['badge']}")
+            idx += 1
         lines.append("")
 
     # Секція 2: Вже переглянуті
-    if watched_items:
-        lines.append(f"⚪️ <b>Вже переглянуті ({len(watched_items)}):</b>")
-        for idx, item in enumerate(watched_items, 1):
+    if watched_titles:
+        lines.append(f"⚪️ <b>Вже переглянуті ({len(watched_titles)}):</b>")
+        for item in watched_titles:
             t_escaped = html.escape(str(item['title']))
             ep_escaped = html.escape(str(item['ep_str']))
             lines.append(f"<b>{idx}.</b> {t_escaped}{ep_escaped}")
+            idx += 1
         lines.append("")
 
-    if not unwatched_items and not watched_items:
+    if not unwatched_titles and not watched_titles:
         lines.append("📋 <i>На диску немає доступних відеофайлів.</i>")
 
     return "\n".join(lines).strip()
@@ -2570,14 +2575,13 @@ async def send_or_update_watchlist_hub(bot: Bot, chat_id: int):
 
 
 def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int) -> InlineKeyboardMarkup:
-    """Будує інтерактивну клавіатуру: спочатку нові серії черги, потім переглянуті."""
+    """Будує інтерактивну клавіатуру: спочатку нові тайтли черги, потім переглянуті (суворо за нумерацією)."""
     keyboard_rows = []
     statuses = get_all_watch_statuses()
 
-    unwatched_buttons = []
-    watched_buttons = []
+    unwatched_items = []
+    watched_items = []
 
-    idx = 1
     for title, files in grouped_anime.items():
         clean_title = format_anime_display_name(title, max_len=27)
 
@@ -2589,53 +2593,50 @@ def build_cleanup_keyboard(grouped_anime: Dict[str, List[Any]], total_size: int)
                 ep_numbers.append(ep)
         ep_numbers.sort()
 
+        if ep_numbers:
+            ep_str = f" (Еп. {', '.join(str(e) for e in ep_numbers)})"
+        else:
+            ep_str = f" ({len(files)} сер.)"
+
+        any_unwatched = any(statuses.get(register_file(f), "new") != "watched" for f in files)
+        has_active = any(is_file_currently_playing(register_file(f)) for f in files)
+        icon = "👀 " if has_active else ("🟢 " if any_unwatched else "⚪️ ")
+
         if len(files) > 1:
             t_key = register_title_folder(files[0].parent)
-            # Перевіряємо чи є хоч одна непереглянута серія
-            any_unwatched = any(statuses.get(register_file(f), "new") != "watched" for f in files)
-            has_active = any(is_file_currently_playing(register_file(f)) for f in files)
-            icon = "👀 " if has_active else ("🟢 " if any_unwatched else "⚪️ ")
-
-            if ep_numbers:
-                ep_str = f" (Еп. {', '.join(str(e) for e in ep_numbers)})"
-            else:
-                ep_str = f" ({len(files)} сер.)"
-            btn_label = left_align_button_text(f"{idx}. {icon}{clean_title}{ep_str}")
-            btn_row = [
-                InlineKeyboardButton(
-                    text=btn_label,
-                    callback_data=f"title:{t_key}"
-                )
-            ]
-            if any_unwatched:
-                unwatched_buttons.append(btn_row)
-            else:
-                watched_buttons.append(btn_row)
+            cb = f"title:{t_key}"
         else:
             file_key = register_file(files[0])
-            st = statuses.get(file_key, "new")
-            is_active = is_file_currently_playing(file_key)
-            if is_active:
-                st = "watching"
-            icon = "👀 " if st == "watching" else ("🟢 " if st == "new" else "⚪️ ")
+            cb = f"item:{file_key}"
 
-            ep = ep_numbers[0] if ep_numbers else None
-            ep_str = f" (Еп. {ep})" if ep else ""
-            btn_label = left_align_button_text(f"{idx}. {icon}{clean_title}{ep_str}")
-            btn_row = [
-                InlineKeyboardButton(
-                    text=btn_label,
-                    callback_data=f"item:{file_key}"
-                )
-            ]
-            if st == "watched":
-                watched_buttons.append(btn_row)
-            else:
-                unwatched_buttons.append(btn_row)
+        btn_data = {
+            "icon": icon,
+            "title": clean_title,
+            "ep_str": ep_str,
+            "callback_data": cb,
+        }
+
+        if any_unwatched:
+            unwatched_items.append(btn_data)
+        else:
+            watched_items.append(btn_data)
+
+    idx = 1
+    # Спочатку кнопки для непереглянутих тайтлів
+    for item in unwatched_items:
+        btn_label = left_align_button_text(f"{idx}. {item['icon']}{item['title']}{item['ep_str']}")
+        keyboard_rows.append([
+            InlineKeyboardButton(text=btn_label, callback_data=item['callback_data'])
+        ])
         idx += 1
 
-    keyboard_rows.extend(unwatched_buttons)
-    keyboard_rows.extend(watched_buttons)
+    # Потім кнопки для повністю переглянутих тайтлів
+    for item in watched_items:
+        btn_label = left_align_button_text(f"{idx}. {item['icon']}{item['title']}{item['ep_str']}")
+        keyboard_rows.append([
+            InlineKeyboardButton(text=btn_label, callback_data=item['callback_data'])
+        ])
+        idx += 1
 
     # Кнопка швидкого видалення вже переглянутих серій (якщо такі є)
     has_watched_any = any(st == "watched" for st in statuses.values())
