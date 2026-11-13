@@ -59,6 +59,25 @@ async def debug_mac(x_sync_secret: Optional[str] = Header(None)):
     return {"state": st, "files_count": sum(len(v) for v in fl.values()), "folders": list(fl.keys())}
 
 
+@api_app.get("/api/mac/test_menu")
+async def test_menu():
+    import traceback
+    try:
+        from bot import get_grouped_anime, build_cleanup_message_text, build_cleanup_keyboard
+        grouped = get_grouped_anime()
+        total_size = sum(sum(f.stat().st_size for f in files) for files in grouped.values()) if grouped else 0
+        text = build_cleanup_message_text(grouped, total_size) if grouped else "empty"
+        kb = build_cleanup_keyboard(grouped, total_size) if grouped else None
+        return {
+            "status": "ok",
+            "grouped_count": len(grouped) if grouped else 0,
+            "text": text,
+            "kb_rows": len(kb.inline_keyboard) if kb else 0
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+
 @api_app.post("/api/mac/commands/clear")
 async def clear_mac_commands():
     from mac_sync_schema import cancel_pending_download_commands

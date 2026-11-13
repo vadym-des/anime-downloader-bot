@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import os
@@ -950,7 +951,10 @@ async def btn_help(message: Message):
 
 
 @dp.message(F.text == "📁 Мої аніме")
+@dp.message(F.text.startswith("📁") & F.text.contains("аніме"))
+@dp.message(F.text.contains("Мої аніме"))
 async def btn_my_anime(message: Message):
+    logger.info(f"Отримано команду «📁 Мої аніме» від {message.from_user.id}")
     await cmd_cleanup_menu(message)
 
 
@@ -2370,14 +2374,18 @@ def build_cleanup_message_text(grouped_anime: Dict[str, List[Any]], total_size: 
         lines.append(f"🟢 <b>Черга до перегляду ({len(unwatched_items)} не бачив):</b>")
         for idx, item in enumerate(unwatched_items, 1):
             badge = " 👀 <i>(зараз у плеєрі)</i>" if item["status"] == "watching" else ""
-            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']}{badge}")
+            t_escaped = html.escape(str(item['title']))
+            ep_escaped = html.escape(str(item['ep_str']))
+            lines.append(f"<b>{idx}.</b> {t_escaped}{ep_escaped}{badge}")
         lines.append("")
 
     # Секція 2: Вже переглянуті
     if watched_items:
         lines.append(f"⚪️ <b>Вже переглянуті ({len(watched_items)}):</b>")
         for idx, item in enumerate(watched_items, 1):
-            lines.append(f"<b>{idx}.</b> {item['title']}{item['ep_str']}")
+            t_escaped = html.escape(str(item['title']))
+            ep_escaped = html.escape(str(item['ep_str']))
+            lines.append(f"<b>{idx}.</b> {t_escaped}{ep_escaped}")
         lines.append("")
 
     if not unwatched_items and not watched_items:
@@ -2660,15 +2668,22 @@ async def cmd_cleanup_menu(message: Message):
     if not is_user_allowed(message.from_user.id):
         return
 
-    grouped = get_grouped_anime()
-    if not grouped:
-        await message.reply("📂 У папці <code>(Завантажене аніме)</code> наразі немає файлів. Усе чисто!")
-        return
+    try:
+        grouped = get_grouped_anime()
+        if not grouped:
+            await message.reply("📂 У папці <code>(Завантажене аніме)</code> наразі немає файлів. Усе чисто!", reply_markup=get_main_reply_keyboard())
+            return
 
-    total_size = sum(sum(f.stat().st_size for f in files) for files in grouped.values())
-    text = build_cleanup_message_text(grouped, total_size)
-    kb = build_cleanup_keyboard(grouped, total_size)
-    await message.reply(text, reply_markup=kb)
+        total_size = sum(sum(f.stat().st_size for f in files) for files in grouped.values())
+        text = build_cleanup_message_text(grouped, total_size)
+        kb = build_cleanup_keyboard(grouped, total_size)
+        await message.reply(text, reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Помилка в cmd_cleanup_menu: {e}", exc_info=True)
+        try:
+            await message.reply(f"⚠️ Не вдалося відкрити меню «Мої аніме»: <code>{html.escape(str(e))}</code>", reply_markup=get_main_reply_keyboard())
+        except Exception:
+            pass
 
 
 @dp.callback_query(F.data == "refresh_list")
