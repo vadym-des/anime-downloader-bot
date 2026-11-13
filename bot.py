@@ -3186,38 +3186,76 @@ async def cb_item_menu(callback: CallbackQuery):
 
     status_badge = "👀 <b>Зараз відкрито у плеєрі IINA на Mac</b>\n\n" if is_active else "🟢 <b>Готово до перегляду</b>\n\n"
 
-    # Визначаємо, куди повертатися кнопкою «Назад»
+    # Визначаємо, куди повертатися кнопкою «Назад» та шукаємо сусідні серії
     parent_dir = file_path.parent
     is_grouped_title = False
     title_back_key = None
+    prev_file = None
+    next_file = None
+
     if parent_dir.exists() and parent_dir != DOWNLOADS_DIR:
         siblings = [
             f for f in parent_dir.iterdir()
             if f.is_file() and f.suffix.lower() in (".mkv", ".mp4", ".webm", ".avi") and not f.name.endswith(".part")
         ]
+        def _ep_sort_key(f):
+            ep = extract_episode_number_from_filename(f.name)
+            return (ep if ep is not None else 9999, f.name)
+        siblings.sort(key=_ep_sort_key)
+
         if len(siblings) > 1:
             is_grouped_title = True
             title_back_key = register_title_folder(parent_dir)
+
+            curr_idx = -1
+            for i, s_f in enumerate(siblings):
+                if s_f.name == file_path.name:
+                    curr_idx = i
+                    break
+
+            if curr_idx != -1:
+                if curr_idx > 0:
+                    prev_file = siblings[curr_idx - 1]
+                if curr_idx + 1 < len(siblings):
+                    next_file = siblings[curr_idx + 1]
 
     if is_grouped_title and title_back_key:
         back_btn = InlineKeyboardButton(text="⬅️ Назад до серій тайтлу", callback_data=f"title:{title_back_key}")
     else:
         back_btn = InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="refresh_list")
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="▶️ Запустити в плеєрі", callback_data=f"play:{file_key}"),
-                InlineKeyboardButton(text="📂 Відкрити у Finder", callback_data=f"reveal:{file_key}"),
-            ],
-            [
-                InlineKeyboardButton(text="🗑 Видалити", callback_data=f"del:{file_key}")
-            ],
-            [
-                back_btn
-            ]
+    # Формуємо рядок навігації між серіями тайтлу
+    nav_row = []
+    if prev_file:
+        p_ep = extract_episode_number_from_filename(prev_file.name)
+        p_label = f"⏮ Серія {p_ep}" if p_ep is not None else "⏮ Попередня"
+        p_key = register_file(prev_file)
+        nav_row.append(InlineKeyboardButton(text=p_label, callback_data=f"item:{p_key}"))
+
+    if next_file:
+        n_ep = extract_episode_number_from_filename(next_file.name)
+        n_label = f"Серія {n_ep} ⏭" if n_ep is not None else "Наступна ⏭"
+        n_key = register_file(next_file)
+        nav_row.append(InlineKeyboardButton(text=n_label, callback_data=f"item:{n_key}"))
+
+    kb_rows = [
+        [
+            InlineKeyboardButton(text="▶️ Запустити в плеєрі", callback_data=f"play:{file_key}"),
+            InlineKeyboardButton(text="📂 Відкрити у Finder", callback_data=f"reveal:{file_key}"),
         ]
-    )
+    ]
+
+    if nav_row:
+        kb_rows.append(nav_row)
+
+    kb_rows.append([
+        InlineKeyboardButton(text="🗑 Видалити", callback_data=f"del:{file_key}")
+    ])
+    kb_rows.append([
+        back_btn
+    ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
     # Витягуємо інформацію про епізод, якість та доріжки для чистого вигляду
     fname = file_path.name
@@ -3227,11 +3265,16 @@ async def cb_item_menu(callback: CallbackQuery):
     quality_str = "4K Ultra HD" if "2160p" in fname else ("1080p Full HD" if "1080p" in fname else "1080p Full HD")
     tracks_label = detect_tracks_label(fname, clean_title, callback.from_user.id)
 
+    next_hint = ""
+    if next_file:
+        n_ep = extract_episode_number_from_filename(next_file.name)
+        next_hint = f"\n💡 <i>На черзі на Mac:</i> <b>Серія {n_ep}</b>" if n_ep is not None else ""
+
     text = (
-        f"🎬 <b>{clean_title}</b>{ep_badge}\n"
+        f"🎬 <b>{html.escape(clean_title)}</b>{ep_badge}\n"
         f"🎞 <b>Якість:</b> <code>{quality_str}</code>\n\n"
         f"🔊 <b>Доріжки:</b> <i>{tracks_label}</i>\n"
-        f"🏷 <b>Finder:</b> 🟢 {TAG_NAME}"
+        f"🏷 <b>Finder:</b> 🟢 {TAG_NAME}{next_hint}"
     )
 
     thumb = get_video_thumbnail(file_path)
