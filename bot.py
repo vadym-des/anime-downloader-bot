@@ -5044,28 +5044,7 @@ async def fex_share_watch_loop(bot: Bot):
             await asyncio.sleep(60)
 
 
-async def backfill_fex_subscriptions_baseline():
-    """Фіксує всі поточні серії в підписках як вже бачені/оброблені, щоб нічого старого не качалося."""
-    try:
-        ep_re = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
-        for s in get_subscriptions():
-            fex_url = s.get("fex_url")
-            share_key = FexDownloader.extract_share_key(fex_url) if fex_url else None
-            if not share_key:
-                continue
-            chat_id = s.get("chat_id", 453079694)
-            files = await FexDownloader.get_files_in_share(share_key)
-            if not files:
-                continue
-            all_names = [f.get("name", "") for f in files]
-            mark_fex_seen(chat_id, share_key, all_names)
-            for f in files:
-                m = ep_re.search(f.get("name", ""))
-                if m:
-                    mark_episode_handled(chat_id, s["title"], int(m.group(1)), f.get("name", ""))
-            logger.info(f"Захисний бейзлайн «{s['title']}»: зафіксовано {len(files)} файлів як бачені")
-    except Exception as e:
-        logger.debug(f"backfill_fex_subscriptions_baseline error: {e}")
+
 
 
 async def main():
@@ -5126,7 +5105,6 @@ async def main():
         logger.debug(f"Помилка звіту про ручний рестарт: {e_rest}")
 
     # Запускаємо фонові монітори
-    asyncio.create_task(backfill_fex_subscriptions_baseline())
     asyncio.create_task(mac_sleep_watchdog(bot))
     asyncio.create_task(channel_monitoring_loop(bot))
     asyncio.create_task(fex_share_watch_loop(bot))
