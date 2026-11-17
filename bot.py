@@ -671,15 +671,16 @@ def cleanup_empty_folder(folder: Path):
     """
     Видаляє папку тайтлу, якщо в ній більше немає відеофайлів.
     Повністю видаляє залишені постери (poster.jpg), прев'ю (<stem>.thumb.jpg) та підпапки.
+    Ніколи не видаляє папки, де зараз завантажуються файли (.part).
     """
     if not folder.exists() or folder == DOWNLOADS_DIR:
         return
     try:
-        remaining_videos = [
-            f for f in folder.iterdir()
-            if f.is_file() and f.suffix.lower() in VIDEO_EXTS and not f.name.endswith(".part")
-        ]
-        if not remaining_videos:
+        has_active_or_video = any(
+            f.is_file() and (f.suffix.lower() in VIDEO_EXTS or f.name.endswith(".part"))
+            for f in folder.iterdir()
+        )
+        if not has_active_or_video:
             logger.info(f"У папці {folder.name} не залишилося відео. Повністю видаляю всю папку та її постери/прев'ю.")
             shutil.rmtree(folder, ignore_errors=True)
     except Exception as e:
@@ -687,18 +688,18 @@ def cleanup_empty_folder(folder: Path):
 
 
 def clean_orphan_anime_folders() -> int:
-    """Видаляє всі папки в (Завантажене аніме), в яких немає жодного відео (лише залишені постери/прев'ю)."""
+    """Видаляє всі папки в (Завантажене аніме), в яких немає жодного відео чи активного завантаження (.part)."""
     if not DOWNLOADS_DIR.exists():
         return 0
     cleaned = 0
     try:
         for item in list(DOWNLOADS_DIR.iterdir()):
             if item.is_dir():
-                has_video = any(
-                    f.is_file() and f.suffix.lower() in VIDEO_EXTS and not f.name.endswith(".part")
+                has_active_or_video = any(
+                    f.is_file() and (f.suffix.lower() in VIDEO_EXTS or f.name.endswith(".part"))
                     for f in item.iterdir()
                 )
-                if not has_video:
+                if not has_active_or_video:
                     shutil.rmtree(item, ignore_errors=True)
                     cleaned += 1
     except Exception as e:
@@ -4834,30 +4835,37 @@ async def channel_monitoring_loop(bot: Bot):
                                         except Exception:
                                             pass
 
-                                await FexDownloader.download_file(dl_url, dest, token=tok, progress_callback=on_auto_dl_prog)
-                                set_macos_tag(dest, TAG_NAME, TAG_COLOR)
-                                set_macos_tag(t_folder, TAG_NAME, TAG_COLOR)
-                                f_key = register_file(dest)
+                                async def _do_ch_dl(d_url=dl_url, d_dest=dest, d_tok=tok, d_folder=t_folder, d_ep=ep_detected, d_ch=ch, d_pid=pid, d_title=display_title, d_user=user_chat, d_notif=notify_msg, d_quiet=quiet, d_ep_text=ep_text):
+                                    async with DOWNLOAD_SEMAPHORE:
+                                        try:
+                                            await FexDownloader.download_file(d_url, d_dest, token=d_tok, progress_callback=on_auto_dl_prog)
+                                            set_macos_tag(d_dest, TAG_NAME, TAG_COLOR)
+                                            set_macos_tag(d_folder, TAG_NAME, TAG_COLOR)
+                                            register_file(d_dest)
 
-                                if ep_detected:
-                                    mark_episode_handled(user_chat, display_title, ep_detected, dest.name)
-                                mark_post_seen(ch, pid)
+                                            if d_ep:
+                                                mark_episode_handled(d_user, d_title, d_ep, d_dest.name)
+                                            mark_post_seen(d_ch, d_pid)
 
-                                if quiet:
-                                    add_to_digest_queue(user_chat, display_title, ep_detected, str(dest))
-                                    try:
-                                        await notify_msg.delete()
-                                    except Exception:
-                                        pass
-                                else:
-                                    await notify_download_finished(
-                                        bot,
-                                        user_chat,
-                                        notify_msg,
-                                        dest,
-                                        display_title,
-                                        prefix_text=f"🎉 <b>Авто-завантаження завершено! {display_title}{ep_text} на ноуті!</b>"
-                                    )
+                                            if d_quiet:
+                                                add_to_digest_queue(d_user, d_title, d_ep, str(d_dest))
+                                                try:
+                                                    await d_notif.delete()
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                await notify_download_finished(
+                                                    bot,
+                                                    d_user,
+                                                    d_notif,
+                                                    d_dest,
+                                                    d_title,
+                                                    prefix_text=f"🎉 <b>Авто-завантаження завершено! {d_title}{d_ep_text} на ноуті!</b>"
+                                                )
+                                        except Exception as e_ch_dl:
+                                            logger.error(f"Помилка завантаження {d_title}: {e_ch_dl}")
+
+                                asyncio.create_task(_do_ch_dl())
                         else:
                             # Файли на FEX ще не з'явилися або сталась тимчасова помилка API: оновлюємо повідомлення й не позначаємо як оброблене
                             try:
