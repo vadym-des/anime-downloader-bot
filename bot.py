@@ -7,6 +7,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -244,6 +245,48 @@ def is_file_currently_playing(file_key: str) -> bool:
             return False
     except Exception:
         return False
+
+
+def is_media_player_running() -> bool:
+    """Перевіряє, чи запущено зараз медіаплеєр на Mac (IINA, QuickTime Player, VLC)."""
+    try:
+        for app in ["IINA", "QuickTime Player", "VLC"]:
+            res = subprocess.run(["/usr/bin/pgrep", "-xi", app], capture_output=True)
+            if res.returncode == 0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+CURRENT_WATCHING_SESSION: Optional[Dict[str, Any]] = None
+
+
+async def local_player_watch_loop():
+    """Фоновий моніторинг сесії перегляду плеєра на Mac: коли плеєр закрито — ставить сірий тег Переглянуто."""
+    global CURRENT_WATCHING_SESSION
+    while True:
+        try:
+            await asyncio.sleep(5)
+            if CURRENT_WATCHING_SESSION:
+                elapsed = time.time() - CURRENT_WATCHING_SESSION.get("started_at", 0)
+                if elapsed >= 15 and not is_media_player_running():
+                    p_str = CURRENT_WATCHING_SESSION.get("path")
+                    f_key = CURRENT_WATCHING_SESSION.get("file_key")
+                    name = CURRENT_WATCHING_SESSION.get("name")
+                    logger.info(f"Плеєр закрито. Позначаємо серію як переглянуту: {name}")
+                    if p_str:
+                        p = Path(p_str)
+                        if p.exists():
+                            try:
+                                set_macos_tag(p, "Переглянуто", 1)  # 1 = Сірий тег Finder
+                            except Exception:
+                                pass
+                    if f_key:
+                        set_file_watch_status(f_key, "watched")
+                    CURRENT_WATCHING_SESSION = None
+        except Exception as e:
+            logger.debug(f"local_player_watch_loop: {e}")
 
 
 TITLE_REGISTRY: Dict[str, Any] = {}
@@ -894,23 +937,35 @@ async def cmd_status(message: Message):
     if not is_user_allowed(message.from_user.id):
         return
 
-    # Перевіряємо стан Mac-агента
-    mac_state = get_mac_device_state()
-    if mac_state:
-        status_dot = "🟢" if mac_state.get("is_online") else "💤"
-        status_text = "Активний (Підключено)" if mac_state.get("is_online") else "Спить / Офлайн (Черга активна)"
-        device_name = mac_state.get("device_name", "MacBook Pro")
-        free_gb = mac_state.get("free_disk_gb", 0.0)
-        uptime_str = mac_state.get("uptime_str", "—")
-        folder_str = mac_state.get("downloads_folder", str(DOWNLOADS_DIR))
-    else:
-        status_dot = "🟡"
-        status_text = "Очікування першого підключення Mac"
-        device_name = "MacBook"
+    # Перевіряємо стан бота та системи
+    if platform.system() == "Darwin":
+        status_dot = "🟢"
+        status_text = "Локальний режим (MacBook)"
+        try:
+            device_name = socket.gethostname().split(".")[0]
+        except Exception:
+            device_name = "MacBook Pro"
         free_gb = get_free_disk_space_gb()
         uptime_sec = int(time.time() - START_TIME)
         uptime_str = f"{uptime_sec // 3600}год {(uptime_sec % 3600) // 60}хв {uptime_sec % 60}с"
         folder_str = str(DOWNLOADS_DIR)
+    else:
+        mac_state = get_mac_device_state()
+        if mac_state:
+            status_dot = "🟢" if mac_state.get("is_online") else "💤"
+            status_text = "Активний (Підключено)" if mac_state.get("is_online") else "Спить / Офлайн (Черга активна)"
+            device_name = mac_state.get("device_name", "MacBook Pro")
+            free_gb = mac_state.get("free_disk_gb", 0.0)
+            uptime_str = mac_state.get("uptime_str", "—")
+            folder_str = mac_state.get("downloads_folder", str(DOWNLOADS_DIR))
+        else:
+            status_dot = "🟡"
+            status_text = "Очікування першого підключення Mac"
+            device_name = "MacBook"
+            free_gb = get_free_disk_space_gb()
+            uptime_sec = int(time.time() - START_TIME)
+            uptime_str = f"{uptime_sec // 3600}год {(uptime_sec % 3600) // 60}хв {uptime_sec % 60}с"
+            folder_str = str(DOWNLOADS_DIR)
 
     git_sha, git_msg = get_current_git_info()
     await message.reply(
@@ -2276,8 +2331,19 @@ class SyncedVirtualFile:
 
 
 def get_grouped_anime() -> Dict[str, List[Any]]:
-    """Групує всі завантажені відеофайли за папками тайтлів (підтримує Mac-синхронізацію)."""
-    # 1. Якщо є синхронізовані дані з Mac-агента — беремо їх
+    """Групує всі завантажені відеофайли за папками тайтлів (підтримує локальний Mac та серверний режим)."""
+    # 1. Локальний режим на Mac: завжди скануємо реальну файлову систему Mac!
+    if platform.system() == "Darwin":
+        videos = get_all_downloaded_videos()
+        grouped: Dict[str, List[Any]] = {}
+        for v in videos:
+            folder_name = v.parent.name if v.parent != DOWNLOADS_DIR else "Різне"
+            grouped.setdefault(folder_name, []).append(v)
+        for t in grouped:
+            grouped[t].sort(key=lambda x: x.name)
+        return grouped
+
+    # 2. Якщо на віддаленому сервері (Linux/Railway) — беремо дані Mac-агента
     synced = get_synced_mac_files()
     if synced:
         grouped: Dict[str, List[Any]] = {}
@@ -2297,14 +2363,12 @@ def get_grouped_anime() -> Dict[str, List[Any]]:
             grouped[folder] = items
         return grouped
 
-    # 2. Локальне сканування файлової системи (якщо бот працює локально)
+    # 3. Запасний варіант локального сканування
     videos = get_all_downloaded_videos()
-    grouped: Dict[str, List[Any]] = {}
+    grouped = {}
     for v in videos:
         folder_name = v.parent.name if v.parent != DOWNLOADS_DIR else "Різне"
         grouped.setdefault(folder_name, []).append(v)
-
-    # Сортуємо серії всередині тайтлу
     for t in grouped:
         grouped[t].sort(key=lambda x: x.name)
     return grouped
@@ -2998,9 +3062,35 @@ async def cb_del_all_confirm(callback: CallbackQuery):
 
 
 def resolve_file(file_key: str, message: Optional[Message] = None) -> Optional[Any]:
-    """Знаходить файл: у таблиці mac_local_files (із Mac-агента), у пам'яті FILE_REGISTRY, або в SQLite."""
-    # 1. Спершу шукаємо у таблиці mac_local_files (найточніші синхронізовані дані від Mac-агента)
+    """Знаходить файл: у пам'яті FILE_REGISTRY, у SQLite або таблиці mac_local_files."""
+    # 1. Швидкий пошук у пам'яті (якщо це реальний Path на Mac)
+    item = FILE_REGISTRY.get(file_key)
+    if item and item.exists():
+        return item
+
+    # 2. Постійна база SQLite (file_registry)
     if DB_PATH.exists():
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                row = conn.execute(
+                    "SELECT file_path FROM file_registry WHERE file_key = ?",
+                    (file_key,)
+                ).fetchone()
+                if row:
+                    p_str = row[0]
+                    if Path(p_str).exists():
+                        p = Path(p_str)
+                        FILE_REGISTRY[file_key] = p
+                        return p
+                    elif platform.system() != "Darwin":
+                        vf = SyncedVirtualFile(p_str, 0)
+                        FILE_REGISTRY[file_key] = vf
+                        return vf
+        except Exception as e:
+            logger.debug(f"Помилка пошуку в SQLite: {e}")
+
+    # 3. Для віддаленого режиму на Linux/Railway — пошук у таблиці mac_local_files
+    if platform.system() != "Darwin" and DB_PATH.exists():
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 conn.row_factory = sqlite3.Row
@@ -3029,33 +3119,6 @@ def resolve_file(file_key: str, message: Optional[Message] = None) -> Optional[A
                         return target_vf
         except Exception as e:
             logger.debug(f"Помилка пошуку в mac_local_files: {e}")
-
-    # 2. Швидкий пошук у пам'яті
-    item = FILE_REGISTRY.get(file_key)
-    if item and item.exists():
-        return item
-
-    # 3. Постійна база SQLite (file_registry)
-    if DB_PATH.exists():
-        try:
-            with sqlite3.connect(DB_PATH) as conn:
-                row = conn.execute(
-                    "SELECT file_path FROM file_registry WHERE file_key = ?",
-                    (file_key,)
-                ).fetchone()
-                if row:
-                    p_str = row[0]
-                    # Якщо локально файлу немає (бо ми на Railway), створюємо віртуальний
-                    if not Path(p_str).exists():
-                        vf = SyncedVirtualFile(p_str, 0)
-                        FILE_REGISTRY[file_key] = vf
-                        return vf
-                    else:
-                        p = Path(p_str)
-                        FILE_REGISTRY[file_key] = p
-                        return p
-        except Exception as e:
-            logger.debug(f"Помилка пошуку в SQLite: {e}")
 
     # 4. Відновлення за текстом повідомлення Telegram
     if message:
@@ -3107,6 +3170,19 @@ async def cb_play_video(callback: CallbackQuery):
     ok, app_name = launch_in_iina(file_path)
     if ok:
         set_currently_playing(file_key)
+        global CURRENT_WATCHING_SESSION
+        p_res = file_path.resolve() if hasattr(file_path, "resolve") else file_path
+        CURRENT_WATCHING_SESSION = {
+            "file_key": file_key,
+            "path": str(p_res),
+            "name": file_path.name,
+            "started_at": time.time(),
+        }
+        try:
+            set_file_watch_status(file_key, "watching")
+            set_macos_tag(file_path, "Дивлюся", 3)  # 3 = Фіолетовий тег Finder
+        except Exception:
+            pass
         try:
             await cb_item_menu(callback)
         except Exception:
@@ -5054,7 +5130,11 @@ async def main():
     asyncio.create_task(channel_monitoring_loop(bot))
     asyncio.create_task(fex_share_watch_loop(bot))
     asyncio.create_task(auto_reload_watcher())
-    asyncio.create_task(run_sync_server())
+    asyncio.create_task(local_player_watch_loop())
+    try:
+        asyncio.create_task(run_sync_server())
+    except Exception:
+        pass
 
     logger.info("Аніме-бот успішно запущений і готовий до роботи!")
     await dp.start_polling(bot)
