@@ -4595,11 +4595,12 @@ async def channel_monitoring_loop(bot: Bot):
         if get_max_seen_post_id("testpushbotanime") is None:
             mark_post_seen("testpushbotanime", 1)
         for ch in init_channels:
-            init_posts = await fetch_channel_posts(ch, pages=1)
-            for p in init_posts:
-                mark_post_seen(ch, p["post_id"])
-            if init_posts:
-                logger.info(f"Channel baseline @{ch}: зафіксовано {len(init_posts)} існуючих постів (max ID={max(p['post_id'] for p in init_posts)})")
+            if get_max_seen_post_id(ch) is None:
+                init_posts = await fetch_channel_posts(ch, pages=1)
+                for p in init_posts:
+                    mark_post_seen(ch, p["post_id"])
+                if init_posts:
+                    logger.info(f"Channel baseline @{ch}: зафіксовано {len(init_posts)} існуючих постів (max ID={max(p['post_id'] for p in init_posts)})")
     except Exception as e_init:
         logger.debug(f"Помилка ініціалізації baseline каналу: {e_init}")
 
@@ -4613,7 +4614,7 @@ async def channel_monitoring_loop(bot: Bot):
             channels = set(s.get("channel", "ridnyiholos") for s in subs) | {"ridnyiholos", "testpushbotanime"}
             for ch in channels:
                 max_seen = get_max_seen_post_id(ch)
-                posts = await fetch_channel_posts(ch, pages=1)
+                posts = await fetch_channel_posts(ch, pages=2)
                 if not posts:
                     continue
 
@@ -4631,10 +4632,10 @@ async def channel_monitoring_loop(bot: Bot):
                         mark_post_seen(ch, pid)
                         continue
 
-                    # Захист від ретроактивних сповіщень при рестарті/оновленні бота:
-                    # якщо пост на @ridnyiholos вийшов ДО запуску поточного процесу бота — тихо додаємо в seen
+                    # Захист від ретроактивних сповіщень при першому старті:
+                    # якщо це перший запуск (max_seen ще не було) і пост вийшов раніше — пропускаємо
                     p_ts = post.get("post_ts")
-                    if ch != "testpushbotanime" and p_ts and p_ts < (boot_ts - 60):
+                    if max_seen is None and ch != "testpushbotanime" and p_ts and p_ts < (boot_ts - 60):
                         mark_post_seen(ch, pid)
                         continue
 
