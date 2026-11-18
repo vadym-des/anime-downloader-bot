@@ -10,6 +10,9 @@ __pycache__/
 
 # SQLite and session data
 *.db
+*.db.bak
+*.bak
+*.log
 *.db-journal
 *.sqlite
 *.session

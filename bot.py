@@ -140,6 +140,19 @@ FILE_REGISTRY: Dict[str, Path] = {}
 
 def init_registry_db():
     try:
+        bak_path = DB_PATH.with_suffix(".db.bak")
+        if DB_PATH.exists() and DB_PATH.stat().st_size > 1024:
+            try:
+                shutil.copy2(DB_PATH, bak_path)
+            except Exception:
+                pass
+        elif not DB_PATH.exists() and bak_path.exists():
+            try:
+                shutil.copy2(bak_path, DB_PATH)
+                logger.info(f"Відновлено базу даних з резервної копії {bak_path}")
+            except Exception:
+                pass
+
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS file_registry (
@@ -3036,6 +3049,14 @@ async def cb_del_all_confirm(callback: CallbackQuery):
     deleted_count = sum(len(files) for files in grouped.values())
     freed_bytes = sum(sum(f.stat().st_size for f in files) for files in grouped.values())
 
+    # Фіксуємо всі серії як оброблені в постійну історію, щоб ніколи повторно не качати їх
+    ep_re_del = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
+    for folder_name, files in grouped.items():
+        for f in files:
+            m_ep = ep_re_del.search(f.name)
+            if m_ep:
+                mark_episode_handled(callback.from_user.id, folder_name, int(m_ep.group(1)), f.name)
+
     # Ставимо команду на очищення Mac-агенту
     queue_mac_command("clean_all")
 
@@ -3060,6 +3081,76 @@ async def cb_del_all_confirm(callback: CallbackQuery):
         f"💾 <b>Вільно на диску Mac:</b> <code>{free_gb:.1f} ГБ</code>"
     )
     await safe_answer(callback, "Всі аніме та папки видалено!", show_alert=True)
+
+
+@dp.callback_query(F.data == "clean_watched_ask")
+async def cb_clean_watched_ask(callback: CallbackQuery):
+    """Запитує підтвердження на видалення переглянутих серій."""
+    statuses = get_all_watch_statuses()
+    grouped = get_grouped_anime()
+    watched_files = []
+    for title, files in grouped.items():
+        for f in files:
+            f_key = register_file(f)
+            if statuses.get(f_key) == "watched":
+                watched_files.append((title, f))
+
+    if not watched_files:
+        await safe_answer(callback, "ℹ️ Немає переглянутих серій для видалення.", show_alert=True)
+        return
+
+    total_size = sum(f.stat().st_size for _, f in watched_files)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"🗑 Так, видалити ({format_bytes(total_size)})", callback_data="clean_watched_confirm"),
+                InlineKeyboardButton(text="↩️ Скасувати", callback_data="refresh_list"),
+            ]
+        ]
+    )
+    await callback.message.edit_text(
+        f"❓ <b>Видалити всі переглянуті серії ({len(watched_files)} шт.)?</b>\n"
+        f"📦 Це звільнить <code>{format_bytes(total_size)}</code> на диску Mac.\n\n"
+        f"<i>Видалені серії будуть назавжди збережені як оброблені й повторно автоматично не завантажуватимуться.</i>",
+        reply_markup=kb,
+    )
+    await safe_answer(callback)
+
+
+@dp.callback_query(F.data == "clean_watched_confirm")
+async def cb_clean_watched_confirm(callback: CallbackQuery):
+    """Видаляє всі переглянуті серії."""
+    statuses = get_all_watch_statuses()
+    grouped = get_grouped_anime()
+    deleted_count = 0
+    freed_bytes = 0
+    ep_re = re.compile(r"\[(\d{1,3})\s*(?:з|/|-)?\s*(?:\d{1,3}|ХХ|XX)?\]")
+
+    for title, files in grouped.items():
+        for f in files:
+            f_key = register_file(f)
+            if statuses.get(f_key) == "watched":
+                try:
+                    freed_bytes += f.stat().st_size
+                    m_ep = ep_re.search(f.name)
+                    if m_ep:
+                        mark_episode_handled(callback.from_user.id, title, int(m_ep.group(1)), f.name)
+                    f.unlink(missing_ok=True)
+                    deleted_count += 1
+                except Exception as ex_del:
+                    logger.error(f"Помилка видалення переглянутого {f}: {ex_del}")
+
+    clean_orphan_anime_folders()
+    mac_state = get_mac_device_state()
+    free_gb = mac_state.get("free_disk_gb", 0.0) if mac_state else get_free_disk_space_gb()
+
+    await callback.message.edit_text(
+        f"✨ <b>Переглянуті серії успішно видалено!</b>\n\n"
+        f"🗑 <b>Видалено:</b> {deleted_count} серій\n"
+        f"💾 <b>Звільнено:</b> <code>{format_bytes(freed_bytes)}</code>\n"
+        f"💿 <b>Вільно на диску Mac:</b> <code>{free_gb:.1f} ГБ</code>"
+    )
+    await safe_answer(callback, "Переглянуті серії очищено!", show_alert=True)
 
 
 def resolve_file(file_key: str, message: Optional[Message] = None) -> Optional[Any]:

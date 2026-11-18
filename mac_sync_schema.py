@@ -212,6 +212,18 @@ def is_episode_handled_or_downloaded(chat_id: int, title: str, ep_num: int) -> b
         if alt_row:
             return True
 
+        # 1c. ЗАПОБІЖНИК: якщо номер серії <= максимальної вже обробленої/переглянутої серії цього тайтлу
+        max_row = conn.execute(
+            """
+            SELECT MAX(episode) FROM mac_handled_episodes
+            WHERE (chat_id = ? OR chat_id = 0)
+              AND (title_norm = ? OR title_norm LIKE ? OR ? LIKE '%' || title_norm || '%')
+            """,
+            (chat_id, t_norm, f"%{t_norm}%", t_norm)
+        ).fetchone()
+        if max_row and max_row[0] is not None and ep_num <= max_row[0]:
+            return True
+
         # 2. Перевіряємо mac_local_files (файли, що зараз лежать на Mac)
         ep_pats = [
             rf"\[0?{ep_num}\s*(?:з|/|-|\])",
